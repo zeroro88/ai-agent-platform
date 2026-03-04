@@ -1,4 +1,4 @@
-# AI Agent 海归服务平台
+# AI Agent 服务平台
 
 基于 Spring Boot + LangChain4j 的智能对话与活动服务。
 
