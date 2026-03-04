@@ -20,7 +20,8 @@
 - Spring Boot 3.2 / Java 17
 - LangChain4j（Agent 编排、LLM 调用、Embedding）
 - LLM：Ollama / DeepSeek（OpenAI 兼容）
-- 记忆：进程内 Working + Session（当前为内存 Map，可配 Redis）；长时记忆为内存向量（InMemoryEmbeddingStore）
+- **Profile**：默认 `local`（无中间件强依赖）；`middleware` 下使用 Redis / MySQL / Milvus 真实接入
+- 记忆：Working（进程内）；Session/槽位（local 内存，middleware 用 Redis）；长时/向量（local 内存，middleware 用 Milvus）
 
 ## 模块与端口
 
@@ -40,11 +41,25 @@ mvn clean install -DskipTests
 
 启动服务（可多终端或后台）：
 
+**默认 local（不依赖 Docker 中间件）：**
 ```bash
 mvn spring-boot:run -pl ai-gateway
 mvn spring-boot:run -pl agent-core
 mvn spring-boot:run -pl rag-service
 mvn spring-boot:run -pl legacy-dummy
+```
+
+**使用真实中间件（需先启动 Docker）：**
+```bash
+# 1. 启动中间件（在 ai-agent-platform 目录下）
+docker compose -f docker/docker-compose.yml up -d mysql redis    # 活动/报名 + 记忆
+docker compose -f docker/docker-compose.yml up -d milvus         # 可选：RAG 向量库
+
+# 2. 以 middleware profile 启动各服务
+mvn spring-boot:run -pl ai-gateway -- -Dspring.profiles.active=middleware
+mvn spring-boot:run -pl agent-core -- -Dspring.profiles.active=middleware
+mvn spring-boot:run -pl rag-service -- -Dspring.profiles.active=middleware
+mvn spring-boot:run -pl legacy-dummy -- -Dspring.profiles.active=middleware
 ```
 
 流式聊天（经网关）：
@@ -55,17 +70,36 @@ curl -X POST http://localhost:8080/api/v1/chat/stream \
   -d '{"message":"推荐上海的活动","sessionId":"test-001","userId":"user-001"}'
 ```
 
+## 中间件与集成测试
+
+项目通过 `docker/docker-compose.yml` 提供 MySQL、Redis、Milvus（及 etcd/minio）等中间件。真实接入仅在 **`middleware` profile** 下生效；集成测试需先启动对应中间件。
+
+**启动中间件后，跑全量回归（middleware）：**
+```bash
+cd ai-agent-platform
+docker compose -f docker/docker-compose.yml up -d mysql redis milvus
+mvn test -Dspring.profiles.active=middleware
+```
+
+**按模块单独验证：**
+| 中间件 | 前置启动 | 测试命令 |
+|--------|----------|----------|
+| Redis | `docker compose -f docker/docker-compose.yml up -d redis` | `mvn -pl agent-core test -Dspring.profiles.active=middleware -Dtest=RedisMemoryIntegrationTest` |
+| MySQL | `docker compose -f docker/docker-compose.yml up -d mysql` | `mvn -pl legacy-dummy test -Dspring.profiles.active=middleware "-Dtest=*Activity*Test,*Register*Test,*Order*Test"` |
+| Milvus | `docker compose -f docker/docker-compose.yml up -d milvus` | `mvn -pl rag-service test -Dspring.profiles.active=middleware -Dtest=RAGMilvusIntegrationTest` |
+
 ## 故障排查
 
 - **traceId**：响应/前端中的 `traceId` 与各服务日志一致，可用 `grep "<traceId>" logs/*.log` 在 `ai-agent-platform/logs/` 下定位。
-- **本地日志**：`mvn spring-boot:run` 时，gateway / agent-core / legacy-dummy 的日志会写入 `ai-agent-platform/logs/` 下对应 `*.log` 文件。
-- **Connection refused**：多为 agent-core 连不上下游。报名需 legacy-dummy (8083)，RAG 需 rag-service (8082)。可在 agent-core 的 `application.yml` 或环境变量中配置 `legacy.service.url`、RAG 服务地址。
+- **本地日志**：`mvn spring-boot:run` 时，gateway / agent-core / legacy-dummy / rag-service 的日志会写入 `ai-agent-platform/logs/` 下对应 `*.log` 文件。
+- **Connection refused（下游服务）**：报名需 legacy-dummy (8083)，RAG 需 rag-service (8082)。可在 agent-core 的 `application.yml` 或环境变量中配置 `legacy.service.url`、RAG 服务地址。
+- **middleware 下连不上中间件**：确认 Docker 已启动且对应容器在跑（`docker ps`）。Redis 未起时 agent-core 会报 Redis 连接失败；MySQL 未起时 legacy-dummy 集成测试会失败；Milvus 未起时 rag-service 会报 gRPC 连接失败。
 
 ## 核心能力（与代码一致）
 
 - **双轨**：快轨（Agent 对话/推荐/咨询）+ 慢轨（传统 API 如报名）。
 - **权限 L0–L3**：L0 自动执行，L1 建议+确认，L2 二次确认（如报名），L3 禁止自动执行。
-- **三层记忆**：Working（进程内）、Session（可配 Redis，当前内存）、Long-term（向量，当前内存实现）。
+- **三层记忆**：Working（进程内）、Session/槽位（local 内存 / middleware Redis）、Long-term（local 内存向量 / middleware 可选 Milvus）。
 - **工具**：searchActivities、getActivityDetail、registerActivity、createActivity、queryOrder（通过 HTTP 调 legacy-dummy）。
 - **RAG**：rag-service 提供向量检索与引用；agent-core 可调用其接口。
 - **Slot 填槽**：ACTIVITY_REGISTER 等意图的结构化参数提取。

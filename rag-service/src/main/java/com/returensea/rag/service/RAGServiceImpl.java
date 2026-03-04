@@ -9,7 +9,6 @@ import dev.langchain4j.store.embedding.EmbeddingMatch;
 import dev.langchain4j.store.embedding.EmbeddingSearchRequest;
 import dev.langchain4j.store.embedding.EmbeddingSearchResult;
 import dev.langchain4j.store.embedding.EmbeddingStore;
-import dev.langchain4j.store.embedding.inmemory.InMemoryEmbeddingStore;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
@@ -25,9 +24,9 @@ public class RAGServiceImpl implements RAGService {
     private final EmbeddingModel embeddingModel;
     private final Map<String, DocumentMetadata> documentMetadata = new ConcurrentHashMap<>();
 
-    public RAGServiceImpl(EmbeddingModel embeddingModel) {
-        this.embeddingStore = new InMemoryEmbeddingStore<>();
+    public RAGServiceImpl(EmbeddingModel embeddingModel, EmbeddingStore<TextSegment> embeddingStore) {
         this.embeddingModel = embeddingModel;
+        this.embeddingStore = embeddingStore;
         initializeSampleDocuments();
     }
 

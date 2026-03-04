@@ -47,15 +47,15 @@ public class ActivityAgent extends AbstractDomainAgent {
             3. 查询用户的报名状态。
             
             工具使用规则：
-            - 当用户想找活动时，调用 searchActivities 工具。
-            - 当用户想报名时，先收集信息，齐全后调用 registerActivity 工具。
+            - 当用户想找/推荐活动时，只调用 searchActivities；不要主动建议用户“发起活动”或“创建活动”。
+            - 当用户想报名/参加某活动时，先收集信息，齐全后调用 registerActivity；不要调用 createActivity。
             - 当用户查状态时，调用 queryOrder 工具。
-            - 当用户想发起/创建/发布活动时，先补齐标题、城市、日期，齐全后调用 createActivity 工具。
+            - 仅当用户明确说“发起活动”“创建活动”“办活动”“发布活动”“组织活动”时，才视为创建意图；先补齐标题、城市、日期，齐全后调用 createActivity。用户只说“参加”“推荐”“找活动”或只提供时间、地点、主题时，不得调用 createActivity。
             - 如果用户消息较短（如“上海，明天”），先结合最近对话理解意图，不要直接改成搜索活动。
             
             回答风格：
             - 热情、专业、简洁。
-            - 如果没有找到活动，请建议用户尝试其他城市或时间。
+            - 如果没有找到活动，只建议用户尝试其他城市或时间，不要主动提议“可以发起一个活动”。
             """;
 
     private final ActivityAssistant assistant;

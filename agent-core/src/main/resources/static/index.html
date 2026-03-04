@@ -47,13 +47,24 @@
         const sessionId = localStorage.getItem('agent_demo_session_id') || `web-${Date.now()}`;
         localStorage.setItem('agent_demo_session_id', sessionId);
 
-        async function sendMessage() {
+        const MAX_NETWORK_RETRIES = 2;
+        const RETRY_DELAY_MS = 1500;
+
+        /** 是否为可重试错误（下游暂时不可用，如 RAG/连接被拒绝） */
+        function isRetryableError(text) {
+            if (!text || typeof text !== 'string') return false;
+            const s = text.toLowerCase();
+            return /connection refused|连接被拒绝|连接失败|暂时无法|rag.*(失败|错误|不可用)|服务.*未启动/.test(s);
+        }
+
+        async function sendMessage(optionalMessage) {
             const input = document.getElementById('userInput');
             const btn = document.getElementById('sendBtn');
-            const text = input.value.trim();
+            const text = (optionalMessage != null ? String(optionalMessage).trim() : input.value.trim());
             
             if (!text) return;
 
+            window._lastSentMessage = text;
             addMessage(text, 'user');
             input.value = '';
             input.disabled = true;
@@ -71,19 +82,30 @@
                     agentType = 'POLICY';
                 }
 
-                const response = await fetch('/api/v1/agent/process-stream', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        sessionId: sessionId,
-                        userId: 'test-user-001',
-                        message: text,
-                        agentType: agentType
-                    })
-                });
-
-                if (!response.ok) throw new Error('API Error');
-                if (!response.body) throw new Error('No response body');
+                let lastError;
+                for (let attempt = 0; attempt <= MAX_NETWORK_RETRIES; attempt++) {
+                    try {
+                        var response = await fetch('/api/v1/agent/process-stream', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                sessionId: sessionId,
+                                userId: 'test-user-001',
+                                message: text,
+                                agentType: agentType
+                            })
+                        });
+                        if (!response.ok) throw new Error('API Error ' + response.status);
+                        if (!response.body) throw new Error('No response body');
+                        lastError = null;
+                        break;
+                    } catch (err) {
+                        lastError = err;
+                        if (attempt === MAX_NETWORK_RETRIES) throw err;
+                        pendingNode.textContent = `网络异常，${RETRY_DELAY_MS / 1000} 秒后重试（${attempt + 1}/${MAX_NETWORK_RETRIES + 1}）…`;
+                        await new Promise(r => setTimeout(r, RETRY_DELAY_MS));
+                    }
+                }
 
                 clearInterval(loadingTimer);
                 let firstChunk = true;
@@ -122,6 +144,18 @@
                                 }
                                 const hasErrorField = data.error || data.errorDetail;
                                 const rawContent = data.content || '';
+                                // 若 content 为 JSON 字符串（如 {"text":"...","type":"message"}），解析后只展示 text
+                                let displayContent = rawContent;
+                                if (typeof rawContent === 'string' && rawContent.trim().startsWith('{')) {
+                                    try {
+                                        const parsed = JSON.parse(rawContent);
+                                        if (parsed && typeof parsed.text === 'string') displayContent = parsed.text;
+                                    } catch (_) { /* 非 JSON 则继续用原文 */ }
+                                }
+                                if (displayContent && !hasErrorField) {
+                                    pendingNode.textContent = stripToolCallJson(displayContent);
+                                    pendingNode.scrollIntoView({ behavior: 'smooth' });
+                                }
                                 const contentLooksLikeError = /失败|错误|未能成功|遇到.*问题|出现.*问题/.test(rawContent);
                                 const bodyText = data.errorDetail || data.error || (contentLooksLikeError ? rawContent : '');
                                 const traceIdLine = (data.traceId ? 'traceId: ' + data.traceId + '\n（用此 ID 在日志中定位：grep 或搜索）\n\n' : '');
@@ -132,6 +166,18 @@
                                     errBlock.style.marginTop = '4px';
                                     errBlock.innerHTML = '<div class="error-detail">' + escapeHtml(textToCopy) + '</div>' +
                                         '<button type="button" class="copy-btn" onclick="copyErrorDetail(this)">复制错误详情</button>';
+                                    if (isRetryableError(textToCopy)) {
+                                        const retryBtn = document.createElement('button');
+                                        retryBtn.type = 'button';
+                                        retryBtn.className = 'copy-btn';
+                                        retryBtn.style.marginLeft = '8px';
+                                        retryBtn.textContent = '重试';
+                                        retryBtn.onclick = function () {
+                                            document.getElementById('userInput').value = window._lastSentMessage || '';
+                                            sendMessage(window._lastSentMessage);
+                                        };
+                                        errBlock.appendChild(retryBtn);
+                                    }
                                     document.getElementById('messages').appendChild(errBlock);
                                     errBlock.scrollIntoView({ behavior: 'smooth' });
                                 }

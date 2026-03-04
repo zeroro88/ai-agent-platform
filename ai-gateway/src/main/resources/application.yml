@@ -4,12 +4,10 @@ server:
 spring:
   application:
     name: ai-gateway
+  profiles:
+    default: local
   config:
     import: optional:classpath:intent-routing-rules.yml
-  data:
-    redis:
-      host: localhost
-      port: 6379
 
 ai:
   gateway:
