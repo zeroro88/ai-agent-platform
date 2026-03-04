@@ -1,0 +1,32 @@
+# 意图路由规则：关键词与意图→Agent 映射，便于阅读与修改，代码只做「按规则匹配」
+# 由 application.yml 的 spring.config.import 引入；prefix = intent-routing
+intent-routing:
+  permission:
+    L0: ["政策", "补贴", "落户", "创业", "优惠", "介绍", "是什么", "怎么办"]
+    L1: ["收藏", "订阅", "关注", "偏好", "推荐"]
+    L2: ["报名", "参加", "预约", "取消", "退款"]
+    L3: ["支付", "转账", "认证", "实名", "绑定银行卡"]
+  intent-keywords:
+    policy: ["政策", "补贴", "落户", "购房", "税费", "优惠", "扶持"]
+    activity-create: ["创建活动", "发起活动", "发布活动", "组织活动", "办活动", "搞活动"]
+    activity: ["活动", "报名", "参加", "会议", "讲座", "沙龙", "聚会", "比赛"]
+    order: ["订单", "支付", "退款", "票券", "核销"]
+    user-profile: ["我", "我的", "资料", "信息"]
+    recommend: ["推荐", "帮我找", "想要"]
+  intent-agent-mapping:
+    POLICY_CONSULT: POLICY
+    ACTIVITY_QUERY: ACTIVITY
+    ACTIVITY_CREATE: ACTIVITY
+    ACTIVITY_REGISTER: ACTIVITY
+    ORDER_QUERY: ACTIVITY
+    RECOMMEND: ACTIVITY
+    USER_PROFILE: ACTIVITY
+    OPERATION: OPERATION
+    CHITCHAT: ACTIVITY
+    UNKNOWN: ACTIVITY
+  entities:
+    cities: ["北京", "上海", "深圳", "广州", "杭州", "成都", "武汉", "西安"]
+  confidence-boost:
+    policy: 0.15
+    activity-query: 0.15
+    activity-create: 0.2

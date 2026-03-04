@@ -1,0 +1,20 @@
+server:
+  port: 8082
+
+spring:
+  application:
+    name: rag-service
+
+ai:
+  rag:
+    top-k: 5
+    min-score: 0.6
+    embedding:
+      model: local
+    chunk:
+      size: 500
+      overlap: 50
+
+logging:
+  level:
+    com.returensea: DEBUG

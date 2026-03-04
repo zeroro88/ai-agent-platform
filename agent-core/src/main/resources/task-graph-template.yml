@@ -1,0 +1,29 @@
+# 任务图流程模板（简单 DSL）：默认 steps + 按意图的 templates，供 Orchestrator 加载
+# 可视化编排可导出同结构的 YAML/JSON 覆盖此处或 templates 下某意图
+ai:
+  agent:
+    task-graph:
+      steps:
+        - node-id: node-intent
+          action: analyze_intent
+          agent-type: SYSTEM
+          order: 0
+          dependencies: []
+        - node-id: node-agent
+          action: process
+          agent-type: FROM_REQUEST
+          order: 1
+          dependencies: [node-intent]
+      # 可选：按意图覆盖流程，key 为 IntentType.name()
+      # templates:
+      #   ACTIVITY_REGISTER:
+      #     - node-id: node-intent
+      #       action: analyze_intent
+      #       agent-type: SYSTEM
+      #       order: 0
+      #       dependencies: []
+      #     - node-id: node-agent
+      #       action: process
+      #       agent-type: FROM_REQUEST
+      #       order: 1
+      #       dependencies: [node-intent]

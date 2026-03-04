@@ -1,0 +1,51 @@
+# 工具列表与权限：name、description、permissionLevel、allowedAgents、enabled 从配置加载
+# 由 application 的 spring.config.import 引入；prefix = ai.agent.tools
+ai:
+  agent:
+    tools:
+      list:
+        - name: searchActivities
+          description: 搜索活动列表
+          permission-level: L0
+          allowed-agents: [ACTIVITY]
+          enabled: true
+        - name: getActivityDetail
+          description: 获取活动详情
+          permission-level: L0
+          allowed-agents: [ACTIVITY]
+          enabled: true
+        - name: registerActivity
+          description: 报名活动
+          permission-level: L2
+          allowed-agents: [ACTIVITY]
+          enabled: true
+        - name: createActivity
+          description: 发起创建活动
+          permission-level: L1
+          allowed-agents: [ACTIVITY]
+          enabled: true
+        - name: queryOrder
+          description: 查询订单状态
+          permission-level: L1
+          allowed-agents: [ACTIVITY]
+          enabled: true
+        - name: searchPolicy
+          description: 搜索政策文档
+          permission-level: L0
+          allowed-agents: [POLICY]
+          enabled: true
+        - name: subscribePolicy
+          description: 订阅政策更新
+          permission-level: L1
+          allowed-agents: [POLICY]
+          enabled: true
+        - name: processPayment
+          description: 处理支付
+          permission-level: L3
+          allowed-agents: []
+          enabled: false
+        - name: refund
+          description: 退款操作
+          permission-level: L3
+          allowed-agents: []
+          enabled: false

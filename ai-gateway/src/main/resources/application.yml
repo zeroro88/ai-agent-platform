@@ -1,0 +1,48 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: ai-gateway
+  config:
+    import: optional:classpath:intent-routing-rules.yml
+  data:
+    redis:
+      host: localhost
+      port: 6379
+
+ai:
+  gateway:
+    intent:
+      low-confidence-threshold: 0.6
+    route:
+      default-service: agent-core
+      timeout-ms: 30000
+      enable-fallback: true
+    rate-limit:
+      enabled: true
+      requests-per-minute: 60
+      burst-capacity: 10
+    auth:
+      enabled: true
+      jwt-secret: ${JWT_SECRET:default-secret-key}
+      token-expiry-minutes: 60
+
+agent-core:
+  base-url: http://localhost:8081
+  connect-timeout: 5000
+  read-timeout: 30000
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  metrics:
+    export:
+      prometheus:
+        enabled: true
+
+logging:
+  level:
+    com.returensea: DEBUG
