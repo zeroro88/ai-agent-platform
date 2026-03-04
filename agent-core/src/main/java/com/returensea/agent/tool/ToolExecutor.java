@@ -231,7 +231,20 @@ public class ToolExecutor {
         String email = (String) params.get("email");
 
         List<String> lastIds = getLastActivityIdsFromContext();
-        if (lastIds != null && !lastIds.isEmpty() && (activityId == null || !lastIds.contains(activityId))) {
+        if (activityId == null || activityId.isBlank()) {
+            String hint = (lastIds != null && !lastIds.isEmpty())
+                    ? "请从最近推荐的活动里选择（如回复 1、2 或活动 ID：act-xxx）。当前候选：" + String.join(", ", lastIds)
+                    : "请先让助手推荐活动，再选择要报名的活动。";
+            log.warn("registerActivity 缺少 activityId，拒绝调用下游");
+            AgentContextHolder.setErrorDetail("[tool=registerActivity] 缺少 activityId\n传入的 params=" + params);
+            return "报名失败。未指定要报名的活动。" + hint;
+        }
+        if (lastIds == null || lastIds.isEmpty()) {
+            log.warn("registerActivity 无最近推荐列表，拒绝调用下游。activityId={}", activityId);
+            AgentContextHolder.setErrorDetail("[tool=registerActivity] 无 lastActivityIds，请先推荐活动\n传入的 activityId=" + activityId);
+            return "报名失败。请先让助手推荐活动，再选择要报名的活动（如回复 1 或活动 ID：act-xxx）。";
+        }
+        if (!lastIds.contains(activityId)) {
             String msg = "活动 ID 不在当前候选列表中，请从最近推荐的活动里选择（如回复 1、2 或活动 ID：act-xxx）。当前候选 ID：" + String.join(", ", lastIds);
             log.warn("registerActivity 拒绝非候选 ID: activityId={}, lastActivityIds={}", activityId, lastIds);
             AgentContextHolder.setErrorDetail("[tool=registerActivity] " + msg + "\n传入的 activityId=" + params.get("activityId"));

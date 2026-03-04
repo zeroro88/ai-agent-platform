@@ -160,6 +160,45 @@ curl -X POST http://localhost:8080/api/v1/chat \
   }'
 ```
 
+## 故障排查
+
+### 用 traceId 在日志中定位
+
+前端/接口返回的 `traceId`（如 `a0508a0ce9384259`）与本次请求在服务端日志中一致，便于排查。
+
+**在 agent-core 或 ai-gateway 日志中搜索：**
+
+```bash
+# 在控制台输出或日志文件中
+grep "a0508a0ce9384259" <日志文件或终端输出>
+```
+
+日志格式为 `[traceId] 消息`，例如：`[a0508a0ce9384259] Processing stream request: 我想报名活动`。
+
+### 本地测试时的统一日志文件
+
+本地用 `mvn spring-boot:run` 启动时，gateway、core、legacy 三个服务的日志会写入 **`ai-agent-platform/logs/`** 目录下的单独文件，便于用 traceId 或 grep 排查：
+
+| 服务 | 日志文件 |
+|------|----------|
+| agent-core | `logs/agent-core.log` |
+| ai-gateway | `logs/ai-gateway.log` |
+| legacy-dummy | `logs/legacy-dummy.log` |
+
+示例：按 traceId 在全部本地日志中搜索：`grep "a0508a0ce9384259" ai-agent-platform/logs/*.log`
+
+### Connection refused（连接被拒绝）
+
+若用户看到“尝试再次连接时出现了 Connection refused”或类似提示，说明 **agent-core 调用下游服务时无法连通**。
+
+| 场景 | 下游服务 | 默认地址 | 处理方式 |
+|------|----------|----------|----------|
+| **报名活动**（registerActivity） | legacy-dummy | `http://localhost:8083` | 启动：`mvn spring-boot:run -pl legacy-dummy` |
+| **查政策/知识库**（RAG） | rag-service | `http://localhost:8082` | 启动：`mvn spring-boot:run -pl rag-service` |
+
+- 报名流程报错时，优先确认 **legacy-dummy (8083)** 已启动。
+- 配置可覆盖：`agent-core` 的 `application.yml` 或环境变量 `legacy.service.url`、`rag-service.base-url`（若使用非默认端口或主机）。
+
 ## 核心特性
 
 ### 1. 双轨架构

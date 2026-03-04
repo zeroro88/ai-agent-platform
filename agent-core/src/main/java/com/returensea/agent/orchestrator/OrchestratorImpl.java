@@ -14,6 +14,8 @@ import com.returensea.agent.agent.DomainAgent;
 import com.returensea.agent.context.AgentContextHolder;
 import com.returensea.agent.memory.MemoryService;
 import com.returensea.agent.config.TaskGraphTemplateProperties;
+import com.returensea.agent.util.ContentSanitizer;
+import com.returensea.agent.util.StreamingContentFilter;
 import com.returensea.agent.slot.SlotFillingService;
 import com.returensea.agent.tool.ToolCenter;
 import com.returensea.common.model.SlotFillingRequest;
@@ -46,6 +48,7 @@ public class OrchestratorImpl implements Orchestrator {
     private final ToolCenter toolCenter;
     private final ObjectMapper objectMapper;
     private final TaskGraphTemplateProperties taskGraphTemplate;
+    private final ContentSanitizer contentSanitizer;
 
     @Override
     public AgentResponse process(AgentRequest request) {
@@ -267,10 +270,12 @@ public class OrchestratorImpl implements Orchestrator {
                     DomainAgent agent = agentMap.get(node.getAgentType());
                     if (agent instanceof ActivityAgent) {
                         StringBuilder accumulated = new StringBuilder();
-                        ((ActivityAgent) agent).streamProcess(buildAgentRequestFromNode(node, taskGraph), token -> {
-                            contentSink.accept(token);
-                            accumulated.append(token);
+                        StreamingContentFilter streamFilter = new StreamingContentFilter(contentSanitizer, chunk -> {
+                            contentSink.accept(chunk);
+                            accumulated.append(chunk);
                         });
+                        ((ActivityAgent) agent).streamProcess(buildAgentRequestFromNode(node, taskGraph), streamFilter::accept);
+                        streamFilter.flush();
                         result = accumulated.toString();
                     } else {
                         result = executeAgentNode(node, taskGraph);
@@ -285,7 +290,7 @@ public class OrchestratorImpl implements Orchestrator {
                 }
                 if (result instanceof String) {
                     if (finalResponse.length() > 0) finalResponse.append("\n\n");
-                    finalResponse.append(result);
+                    finalResponse.append(contentSanitizer.stripSpuriousTokens((String) result));
                 }
                 taskGraph.getContext().put(node.getNodeId(), result);
             } catch (Exception e) {
@@ -422,7 +427,7 @@ public class OrchestratorImpl implements Orchestrator {
                     if (finalResponse.length() > 0) {
                         finalResponse.append("\n\n");
                     }
-                    finalResponse.append(result);
+                    finalResponse.append(contentSanitizer.stripSpuriousTokens((String) result));
                 }
                 
                 taskGraph.getContext().put(node.getNodeId(), result);

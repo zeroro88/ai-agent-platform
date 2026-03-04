@@ -87,6 +87,7 @@
 
                 clearInterval(loadingTimer);
                 let firstChunk = true;
+                let streamedRaw = '';
                 const reader = response.body.getReader();
                 const decoder = new TextDecoder();
                 let buffer = '';
@@ -107,10 +108,11 @@
                             const payload = event.payload;
                             if (type === 'contentDelta' && typeof payload === 'string') {
                                 if (firstChunk) {
-                                    pendingNode.textContent = '';
+                                    streamedRaw = '';
                                     firstChunk = false;
                                 }
-                                pendingNode.textContent += payload;
+                                streamedRaw += payload;
+                                pendingNode.textContent = stripToolCallJson(streamedRaw);
                                 pendingNode.scrollIntoView({ behavior: 'smooth' });
                             } else if (type === 'done' && payload) {
                                 const data = payload;
@@ -187,6 +189,33 @@
             return div;
         }
 
+        /** 从流式内容中移除工具调用的原始 JSON，只保留友好文案；替换为简短提示。杂散 token 由后端输出护栏统一过滤。 */
+        function stripToolCallJson(text) {
+            if (!text || typeof text !== 'string') return '';
+            let s = text;
+            const nameArgStart = /\{\s*"name"\s*:\s*"([^"]+)"\s*,\s*"arguments"\s*:\s*\{/g;
+            let match;
+            while ((match = nameArgStart.exec(s)) !== null) {
+                const start = match.index;
+                const name = match[1];
+                const braceStart = s.indexOf('{', start);
+                let depth = 0;
+                let end = -1;
+                for (let i = braceStart; i < s.length; i++) {
+                    if (s[i] === '{') depth++;
+                    else if (s[i] === '}') { depth--; if (depth === 0) { end = i; break; } }
+                }
+                if (end === -1) break;
+                const replacement = (name === 'registerActivity') ? '\n【已提交报名信息】\n' :
+                    (name === 'searchActivities') ? '\n【已查询活动列表】\n' :
+                    (name === 'createActivity') ? '\n【已创建活动】\n' :
+                    (name === 'queryOrder') ? '\n【已查询订单】\n' : '';
+                s = s.slice(0, start) + replacement + s.slice(end + 1);
+                nameArgStart.lastIndex = 0;
+            }
+            return s.replace(/\n{3,}/g, '\n\n').trim();
+        }
+
         function normalizeContent(content) {
             if (!content) return '';
             if (typeof content === 'string' && content.trim().startsWith('{')) {
@@ -196,7 +225,8 @@
                 } catch (e) { /* keep content as-is */ }
             }
             let s = content.replace(/^Intent analyzed:[^\n]*\n\n?/gm, '').trim();
-            // 去掉泄露的 tool 调用 JSON 行及首行噪音（如 ronics,）
+            s = stripToolCallJson(s);  /* 仅处理 tool call JSON，杂散 token 由后端过滤 */
+            // 去掉首行噪音（如 ronics,）
             s = s.split('\n').filter(function(line) {
                 const t = line.trim();
                 if (!t) return true;

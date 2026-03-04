@@ -32,13 +32,26 @@ ai:
       base-url: ${LLM_BASE_URL:https://api.deepseek.com/v1}
       api-key: ${LLM_API_KEY:sk-your-key-here}
       model: ${LLM_MODEL_NAME:deepseek-chat}
-      temperature: 0.7
+      # 降低以减轻杂散 token（如 leton），更稳定输出
+      temperature: 0.3
       
       # Ollama 本地配置
       ollama:
         base-url: ${OLLAMA_BASE_URL:http://localhost:11434}
         model: ${OLLAMA_MODEL_NAME:qwen2.5:7b} # 推荐 Qwen2.5 或 Llama3
+    # 输出护栏：过滤 LLM 杂散 token 与英文结尾语等，可配置扩展
+    output-guardrails:
+      banned-tokens:
+        - extrême
+        - extreme
+        - leton
+      # 正则：匹配整段英文 sign-off（如 Sincerely, I will proceed...），含无空格粘连形式
+      banned-patterns:
+        - "(?i)s?incerely,?[^.。！？!?]*[.。]?"
 
 logging:
   level:
     com.returensea: DEBUG
+  # 本地测试：与 gateway、legacy 统一输出到 ai-agent-platform/logs/ 便于排查
+  file:
+    name: ../../logs/agent-core.log

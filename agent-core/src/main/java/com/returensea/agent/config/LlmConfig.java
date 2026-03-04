@@ -33,12 +33,16 @@ public class LlmConfig {
     @Value("${ai.agent.llm.ollama.model:qwen2.5:7b}")
     private String ollamaModelName;
 
+    @Value("${ai.agent.llm.temperature:0.3}")
+    private double temperature;
+
     @Bean
     public ChatModel chatLanguageModel() {
         if ("ollama".equalsIgnoreCase(provider)) {
             return OllamaChatModel.builder()
                     .baseUrl(ollamaBaseUrl)
                     .modelName(ollamaModelName)
+                    .temperature(temperature)
                     .timeout(Duration.ofSeconds(60))
                     .logRequests(true)
                     .logResponses(true)
@@ -48,6 +52,7 @@ public class LlmConfig {
                     .apiKey(apiKey)
                     .baseUrl(baseUrl)
                     .modelName(modelName)
+                    .temperature(temperature)
                     .timeout(Duration.ofSeconds(60))
                     .logRequests(true)
                     .logResponses(true)
@@ -61,6 +66,7 @@ public class LlmConfig {
             return OllamaStreamingChatModel.builder()
                     .baseUrl(ollamaBaseUrl)
                     .modelName(ollamaModelName)
+                    .temperature(temperature)
                     .timeout(Duration.ofSeconds(60))
                     .build();
         } else {
@@ -68,6 +74,7 @@ public class LlmConfig {
                     .apiKey(apiKey)
                     .baseUrl(baseUrl)
                     .modelName(modelName)
+                    .temperature(temperature)
                     .timeout(Duration.ofSeconds(60))
                     .build();
         }

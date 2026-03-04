@@ -8,3 +8,6 @@ spring:
 logging:
   level:
     com.returensea: DEBUG
+  # 本地测试：与 gateway、core 统一输出到 ai-agent-platform/logs/ 便于排查
+  file:
+    name: ../../logs/legacy-dummy.log
