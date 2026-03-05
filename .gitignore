@@ -27,3 +27,6 @@ hs_err_pid*
 # Logs
 *.log
 logs/
+
+# 本地待办，不纳入版本库
+TODO.md
