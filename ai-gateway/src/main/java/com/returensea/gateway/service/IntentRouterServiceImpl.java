@@ -10,11 +10,13 @@ import com.returensea.gateway.dto.ChatRequest;
 import com.returensea.gateway.dto.RouteResult;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 @Slf4j
 @Service
@@ -24,20 +26,40 @@ public class IntentRouterServiceImpl implements IntentRouterService {
     private final GatewayProperties properties;
     private final IntentRoutingProperties routingRules;
 
+    @Autowired(required = false)
+    private LlmIntentClassifier llmIntentClassifier;
+
     @Override
     public RouteResult route(ChatRequest request) {
-        String message = request.getMessage().toLowerCase();
+        String rawMessage = request.getMessage();
+        String message = rawMessage.toLowerCase();
 
+        double threshold = properties.getIntent() != null ? properties.getIntent().getLowConfidenceThreshold() : 0.6;
+
+        // 1) 关键词路径
         IntentType intentType = classifyIntent(message);
         AgentType targetAgent = determineTargetAgent(intentType);
         PermissionLevel requiredPermission = determinePermissionLevel(message);
         RouteType routeType = determineRouteType(requiredPermission);
         Map<String, Object> entities = extractEntities(message, intentType);
-
         double confidence = calculateConfidence(message, intentType);
-        double threshold = properties.getIntent() != null ? properties.getIntent().getLowConfidenceThreshold() : 0.6;
-        boolean needsClarification = confidence < threshold;
 
+        // 2) 低置信度且启用 LLM 时，用 LLM 再分类一次
+        if (confidence < threshold && llmIntentClassifier != null) {
+            Optional<LlmIntentClassifier.LlmIntentResult> llmResult = llmIntentClassifier.classify(rawMessage);
+            if (llmResult.isPresent()) {
+                LlmIntentClassifier.LlmIntentResult r = llmResult.get();
+                intentType = r.intentType();
+                confidence = r.confidence();
+                if (r.entities() != null && !r.entities().isEmpty()) {
+                    entities = new HashMap<>(r.entities());
+                }
+                targetAgent = determineTargetAgent(intentType);
+                log.debug("LLM intent override: intent={}, confidence={}", intentType, confidence);
+            }
+        }
+
+        boolean needsClarification = confidence < threshold;
         return RouteResult.builder()
                 .intentType(intentType)
                 .targetAgent(targetAgent)

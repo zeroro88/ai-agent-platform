@@ -29,6 +29,20 @@ public class GatewayProperties {
     @Data
     public static class IntentConfig {
         private double lowConfidenceThreshold = 0.6;
+        /** 低置信度时是否用 LLM 做意图分类；未配置或 false 则仅关键词 */
+        private LlmConfig llm = new LlmConfig();
+
+        @Data
+        public static class LlmConfig {
+            private boolean enabled = false;
+            private String provider = "ollama";
+            private String apiKey = "";
+            private String baseUrl = "";
+            private String model = "";
+            private String ollamaBaseUrl = "http://localhost:11434";
+            private String ollamaModel = "qwen2.5:7b";
+            private double temperature = 0.1;
+        }
     }
 
     @Data

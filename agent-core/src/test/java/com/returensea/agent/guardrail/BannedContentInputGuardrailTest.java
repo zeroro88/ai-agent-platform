@@ -74,6 +74,21 @@ class BannedContentInputGuardrailTest {
             InputGuardrailResult r2 = guardrail.validate(UserMessage.from("当前用户输入：假药"));
             assertThat(r2.failures()).isNotEmpty();
         }
+
+        @Test
+        @DisplayName("仅校验「当前用户输入」之后的内容，历史中出现禁止词不误判")
+        void whenBannedTokenOnlyInHistory_doesNotBlock() {
+            InputGuardrailsProperties props = new InputGuardrailsProperties();
+            props.setEnabled(true);
+            props.setBannedTokens(List.of("色情"));
+            props.setBlockMessage(BLOCK_MSG);
+
+            BannedContentInputGuardrail guardrail = new BannedContentInputGuardrail(props);
+
+            String fullContext = "最近对话如下：\n用户：不要色情\n助手：好的\n当前用户输入：我想报名活动";
+            InputGuardrailResult r = guardrail.validate(UserMessage.from(fullContext));
+            assertThat(r.failures()).isEmpty();
+        }
     }
 
     @Nested

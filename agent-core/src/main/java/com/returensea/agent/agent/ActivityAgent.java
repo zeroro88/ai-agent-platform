@@ -21,7 +21,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
-import java.util.function.Consumer;
+import java.util.function.BiConsumer;
 import java.util.stream.Collectors;
 
 @Slf4j
@@ -112,26 +112,26 @@ public class ActivityAgent extends AbstractDomainAgent {
     private static final long STREAM_WAIT_TIMEOUT_MINUTES = 2;
 
     /**
-     * 流式处理：每生成一段内容就通过 contentSink 推送（LangChain4j 1.x 已支持 Ollama 流式 + tools）。
+     * 流式处理：通过 eventSink(type, payload) 推送，type 为 "contentDelta"（正常内容）或 "contentBanned"（护栏拦截）。
      * 会阻塞直到流结束或超时，避免 SSE 在未收到内容前就完成。
      */
-    public void streamProcess(AgentRequest request, Consumer<String> contentSink) {
+    public void streamProcess(AgentRequest request, BiConsumer<String, String> eventSink) {
         log.info("ActivityAgent streaming request: {}", request.getMessage());
         try {
             String createResult = tryHandleCreateContinuation(request);
             if (createResult != null) {
-                contentSink.accept(createResult);
+                eventSink.accept("contentDelta", createResult);
                 return;
             }
             String contextAwareMessage = buildContextAwareMessage(request);
             TokenStream stream = streamingAssistant.chat(contextAwareMessage);
             CountDownLatch done = new CountDownLatch(1);
             stream
-                    .onPartialResponse(contentSink)
+                    .onPartialResponse(chunk -> eventSink.accept("contentDelta", chunk))
                     .onCompleteResponse(r -> done.countDown())
                     .onError(e -> {
                         log.error("ActivityAgent streaming error", e);
-                        contentSink.accept("抱歉，我现在有点忙，请稍后再试。（流式调用异常）");
+                        eventSink.accept("contentDelta", "抱歉，我现在有点忙，请稍后再试。（流式调用异常）");
                         done.countDown();
                     })
                     .start();
@@ -141,10 +141,10 @@ public class ActivityAgent extends AbstractDomainAgent {
         } catch (InputGuardrailException e) {
             String msg = extractGuardrailBlockMessage(e.getMessage());
             log.warn("ActivityAgent streaming input guardrail blocked: {}", msg);
-            contentSink.accept(msg);
+            eventSink.accept("contentBanned", msg);
         } catch (Exception e) {
             log.error("Error in ActivityAgent streaming", e);
-            contentSink.accept("抱歉，我现在有点忙，请稍后再试。（LLM 调用失败）");
+            eventSink.accept("contentDelta", "抱歉，我现在有点忙，请稍后再试。（LLM 调用失败）");
         }
     }
 

@@ -13,6 +13,19 @@ ai:
   gateway:
     intent:
       low-confidence-threshold: 0.6
+      # 低置信度时用 LLM 做意图分类；不配置或 enabled: false 则仅关键词
+      llm:
+        enabled: false
+        provider: ollama
+        ollama-base-url: http://localhost:11434
+        ollama-model: qwen2.5:7b
+        temperature: 0.1
+        # 使用 OpenAI 兼容 API 时示例：
+        # enabled: true
+        # provider: openai
+        # base-url: https://api.deepseek.com/v1
+        # api-key: ${LLM_API_KEY:}
+        # model: deepseek-chat
     route:
       default-service: agent-core
       timeout-ms: 30000

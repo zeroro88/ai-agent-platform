@@ -27,6 +27,7 @@ import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
 import java.util.*;
+import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
@@ -152,7 +153,7 @@ public class OrchestratorImpl implements Orchestrator {
     }
 
     @Override
-    public void processStream(AgentRequest request, Consumer<String> contentSink, Consumer<AgentResponse> onComplete) {
+    public void processStream(AgentRequest request, BiConsumer<String, Object> eventSink, Consumer<AgentResponse> onComplete) {
         long startTime = System.currentTimeMillis();
         String traceId = request.getTraceId();
         if (traceId == null || traceId.isEmpty()) {
@@ -219,7 +220,7 @@ public class OrchestratorImpl implements Orchestrator {
             steps.add("构建任务图");
             TaskGraph taskGraph = buildTaskGraph(requestForGraph);
             steps.add("执行任务图");
-            AgentResponse response = executeTaskGraphStreaming(taskGraph, contentSink);
+            AgentResponse response = executeTaskGraphStreaming(taskGraph, eventSink);
             steps.add("Agent 处理完成");
             if (response.getAgentType() == null) response.setAgentType(request.getAgentType());
             if (response.getUsedPermission() == null) response.setUsedPermission(request.getRequiredPermission());
@@ -248,7 +249,7 @@ public class OrchestratorImpl implements Orchestrator {
     /**
      * 与 executeTaskGraph 类似，但对 ACTIVITY 的 process 节点使用流式输出。
      */
-    private AgentResponse executeTaskGraphStreaming(TaskGraph taskGraph, Consumer<String> contentSink) {
+    private AgentResponse executeTaskGraphStreaming(TaskGraph taskGraph, BiConsumer<String, Object> eventSink) {
         taskGraph.setStatus(TaskGraph.TaskStatus.RUNNING);
         Map<String, TaskGraph.TaskNode> nodeMap = taskGraph.getAllNodes().stream()
                 .collect(Collectors.toMap(TaskGraph.TaskNode::getNodeId, n -> n));
@@ -270,11 +271,20 @@ public class OrchestratorImpl implements Orchestrator {
                     DomainAgent agent = agentMap.get(node.getAgentType());
                     if (agent instanceof ActivityAgent) {
                         StringBuilder accumulated = new StringBuilder();
-                        StreamingContentFilter streamFilter = new StreamingContentFilter(contentSanitizer, chunk -> {
-                            contentSink.accept(chunk);
+                        Consumer<String> contentDeltaSink = chunk -> {
+                            eventSink.accept("contentDelta", chunk);
                             accumulated.append(chunk);
-                        });
-                        ((ActivityAgent) agent).streamProcess(buildAgentRequestFromNode(node, taskGraph), streamFilter::accept);
+                        };
+                        StreamingContentFilter streamFilter = new StreamingContentFilter(contentSanitizer, contentDeltaSink);
+                        BiConsumer<String, String> agentEventSink = (type, payload) -> {
+                            if ("contentBanned".equals(type)) {
+                                eventSink.accept("contentBanned", payload);
+                                accumulated.append(payload);
+                            } else {
+                                streamFilter.accept(payload);
+                            }
+                        };
+                        ((ActivityAgent) agent).streamProcess(buildAgentRequestFromNode(node, taskGraph), agentEventSink);
                         streamFilter.flush();
                         result = accumulated.toString();
                     } else {

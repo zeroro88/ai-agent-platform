@@ -15,6 +15,7 @@ import java.io.IOException;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.function.BiConsumer;
 
 @Slf4j
 @RestController
@@ -47,19 +48,16 @@ public class AgentController {
         emitter.onTimeout(() -> log.warn("SSE timeout for sessionId={}", request.getSessionId()));
         streamExecutor.execute(() -> {
             try {
-                orchestrator.processStream(
-                        request,
-                        chunk -> sendEvent(emitter, "contentDelta", chunk),
-                        response -> {
-                            try {
-                                sendEvent(emitter, "done", response);
-                                emitter.complete();
-                            } catch (Exception e) {
-                                log.error("Error sending done event", e);
-                                emitter.completeWithError(e);
-                            }
-                        }
-                );
+                BiConsumer<String, Object> eventSink = (type, payload) -> sendEvent(emitter, type, payload);
+                orchestrator.processStream(request, eventSink, response -> {
+                    try {
+                        sendEvent(emitter, "done", response);
+                        emitter.complete();
+                    } catch (Exception e) {
+                        log.error("Error sending done event", e);
+                        emitter.completeWithError(e);
+                    }
+                });
             } catch (Exception e) {
                 log.error("Error in processStream", e);
                 try {

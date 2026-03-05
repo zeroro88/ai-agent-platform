@@ -1,0 +1,11 @@
+# 集成测试用：不启用意图 LLM，避免连真实 Ollama/OpenAI
+spring:
+  config:
+    import: optional:classpath:intent-routing-rules.yml
+
+ai:
+  gateway:
+    intent:
+      low-confidence-threshold: 0.6
+      llm:
+        enabled: false
