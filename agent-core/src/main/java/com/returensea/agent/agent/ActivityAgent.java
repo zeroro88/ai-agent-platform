@@ -1,5 +1,6 @@
 package com.returensea.agent.agent;
 
+import com.returensea.agent.guardrail.BannedContentInputGuardrail;
 import com.returensea.agent.memory.MemoryService;
 import com.returensea.agent.tool.ToolCenter;
 import com.returensea.common.enums.AgentType;
@@ -7,6 +8,7 @@ import com.returensea.common.enums.PermissionLevel;
 import com.returensea.common.model.AgentRequest;
 import dev.langchain4j.model.chat.ChatModel;
 import dev.langchain4j.model.chat.StreamingChatModel;
+import dev.langchain4j.guardrail.InputGuardrailException;
 import dev.langchain4j.service.AiServices;
 import dev.langchain4j.service.SystemMessage;
 import dev.langchain4j.service.TokenStream;
@@ -66,16 +68,19 @@ public class ActivityAgent extends AbstractDomainAgent {
     public ActivityAgent(ChatModel chatLanguageModel,
                          StreamingChatModel streamingChatLanguageModel,
                          ToolCenter toolCenter,
-                         MemoryService memoryService) {
+                         MemoryService memoryService,
+                         BannedContentInputGuardrail inputGuardrail) {
         this.memoryService = memoryService;
         this.toolCenter = toolCenter;
         this.assistant = AiServices.builder(ActivityAssistant.class)
                 .chatModel(chatLanguageModel)
                 .tools(toolCenter)
+                .inputGuardrails(inputGuardrail)
                 .build();
         this.streamingAssistant = AiServices.builder(ActivityAssistantStreaming.class)
                 .streamingChatModel(streamingChatLanguageModel)
                 .tools(toolCenter)
+                .inputGuardrails(inputGuardrail)
                 .build();
     }
 
@@ -94,6 +99,10 @@ public class ActivityAgent extends AbstractDomainAgent {
             }
             String contextAwareMessage = buildContextAwareMessage(request);
             return assistant.chat(contextAwareMessage);
+        } catch (InputGuardrailException e) {
+            String msg = extractGuardrailBlockMessage(e.getMessage());
+            log.warn("ActivityAgent input guardrail blocked: {}", msg);
+            return msg;
         } catch (Exception e) {
             log.error("Error in ActivityAgent LLM processing", e);
             return "抱歉，我现在有点忙，请稍后再试。（LLM 调用失败）";
@@ -129,10 +138,27 @@ public class ActivityAgent extends AbstractDomainAgent {
             if (!done.await(STREAM_WAIT_TIMEOUT_MINUTES, TimeUnit.MINUTES)) {
                 log.warn("ActivityAgent streaming wait timed out");
             }
+        } catch (InputGuardrailException e) {
+            String msg = extractGuardrailBlockMessage(e.getMessage());
+            log.warn("ActivityAgent streaming input guardrail blocked: {}", msg);
+            contentSink.accept(msg);
         } catch (Exception e) {
             log.error("Error in ActivityAgent streaming", e);
             contentSink.accept("抱歉，我现在有点忙，请稍后再试。（LLM 调用失败）");
         }
+    }
+
+    /** 从 LangChain4j InputGuardrailException 中取出给用户看的拦截话术（框架可能包成 "The guardrail ... failed with this message: xxx"） */
+    private static String extractGuardrailBlockMessage(String exceptionMessage) {
+        if (exceptionMessage == null || exceptionMessage.isEmpty()) {
+            return "您的问题涉及敏感或违规内容，请换一种方式提问。";
+        }
+        String prefix = "this message: ";
+        int idx = exceptionMessage.lastIndexOf(prefix);
+        if (idx >= 0 && idx + prefix.length() < exceptionMessage.length()) {
+            return exceptionMessage.substring(idx + prefix.length()).trim();
+        }
+        return exceptionMessage;
     }
 
     private String tryHandleCreateContinuation(AgentRequest request) {

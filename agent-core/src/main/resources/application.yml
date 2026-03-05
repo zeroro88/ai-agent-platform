@@ -34,6 +34,65 @@ ai:
       ollama:
         base-url: ${OLLAMA_BASE_URL:http://localhost:11434}
         model: ${OLLAMA_MODEL_NAME:qwen2.5:7b} # 推荐 Qwen2.5 或 Llama3
+    # 输入护栏：在调用 LLM 前校验用户消息，命中禁止词/正则则拦截（LangChain4j InputGuardrail）
+    # 以下为国内常用敏感词/违禁词 starter，完整词库可参考：https://github.com/konsheng/Sensitive-lexicon 、https://github.com/houbb/sensitive-word
+    input-guardrails:
+      enabled: true
+      block-message: "您的问题涉及敏感或违规内容，请换一种方式提问。"
+      # 可选：从文件加载更多敏感词（每行一词，# 为注释），与下方 banned-tokens 合并。可用 Sensitive-lexicon 等词库
+      # banned-tokens-file: classpath:sensitive-words.txt
+      banned-tokens:
+        # 提示词注入/越狱类
+        - 忽略上文
+        - 忽略以上
+        - 忽略前文
+        - 不要遵守
+        - 忘记你的指令
+        - 忘记上述
+        - 扮演
+        - 假装你是
+        - 你现在是
+        - jailbreak
+        - DAN
+        - ignore above
+        - ignore previous
+        - disregard instructions
+        - 脱敏
+        - 绕过
+        - 破解
+        # 常见违禁/不当用语（starter，可按业务扩充）
+        - 违禁词
+        - 敏感词
+        - 黄赌毒
+        - 六合彩
+        - 博彩
+        - 赌博
+        - 色情
+        - 裸聊
+        - 代开发票
+        - 办证
+        - 刻章
+        - 套现
+        - 刷单
+        - 裸贷
+        - 高利贷
+        - 传销
+        - 诈骗
+        - 杀猪盘
+        - 洗钱
+        - 走私
+        - 枪支
+        - 毒品
+        - 冰毒
+        - 海洛因
+        - 违禁品
+        - 假药
+      banned-patterns:
+        # 常见注入句式
+        - "(?i)ignore\\s+(all\\s+)?(above|previous|prior)\\s+(instructions?|prompts?)"
+        - "(?i)disregard\\s+(all\\s+)?(above|previous)"
+        - "忽略[上以]?文.*(指令|要求)"
+        - "不要(遵守|执行|遵循).*(指令|规则)"
     # 输出护栏：过滤 LLM 杂散 token 与英文结尾语等，可配置扩展
     output-guardrails:
       banned-tokens:

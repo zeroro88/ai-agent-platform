@@ -1,0 +1,11 @@
+# 敏感词示例文件（可选）。启用请在 application.yml 中设置：
+# ai.agent.input-guardrails.banned-tokens-file=classpath:sensitive-words.txt
+# 每行一词，# 开头为注释。完整词库可替换为：
+# https://github.com/konsheng/Sensitive-lexicon
+# https://github.com/houbb/sensitive-word
+# 下方为少量示例，与 yaml 中 banned-tokens 合并使用
+反动
+暴力
+恐怖
+邪教
+假药
