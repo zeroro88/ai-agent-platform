@@ -9,13 +9,17 @@ import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
+import java.io.Serializable;
 import java.util.Map;
 
 @Data
 @Builder
 @NoArgsConstructor
 @AllArgsConstructor
-public class RouteResult {
+public class RouteResult implements Serializable {
+
+    private static final long serialVersionUID = 1L;
+
     private IntentType intentType;
     private AgentType targetAgent;
     private RouteType routeType;

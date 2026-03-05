@@ -1,0 +1,30 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        
+        {
+            "type": "java",
+            "name": "agent-core (middleware)",
+            "request": "launch",
+            "mainClass": "com.returensea.agent.AgentCoreApplication",
+            "projectName": "agent-core",
+            "args": "--spring.profiles.active=middleware"
+        },
+        {
+            "type": "java",
+            "name": "ai-gateway (middleware)",
+            "request": "launch",
+            "mainClass": "com.returensea.gateway.AiGatewayApplication",
+            "projectName": "ai-gateway",
+            "args": "--spring.profiles.active=middleware"
+        },
+        {
+            "type": "java",
+            "name": "rag-service (middleware)",
+            "request": "launch",
+            "mainClass": "com.returensea.rag.RagServiceApplication",
+            "projectName": "rag-service",
+            "args": "--spring.profiles.active=middleware"
+        }
+    ]
+}

@@ -26,6 +26,7 @@
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <spring-boot.version>3.2.1</spring-boot.version>
         <langchain4j.version>1.11.0</langchain4j.version>
+        <langgraph4j.version>1.8.0</langgraph4j.version>
         <!-- all-minilm-l6-v2-q 仅发布到 0.36.x，与 1.x core 兼容使用 -->
         <langchain4j.embeddings.minilm.q.version>0.36.2</langchain4j.embeddings.minilm.q.version>
         <lombok.version>1.18.38</lombok.version>
@@ -52,6 +53,21 @@
                 <groupId>dev.langchain4j</groupId>
                 <artifactId>langchain4j-embeddings-all-minilm-l6-v2-q</artifactId>
                 <version>${langchain4j.embeddings.minilm.q.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.bsc.langgraph4j</groupId>
+                <artifactId>langgraph4j-core</artifactId>
+                <version>${langgraph4j.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.bsc.langgraph4j</groupId>
+                <artifactId>langgraph4j-langchain4j</artifactId>
+                <version>${langgraph4j.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.bsc.langgraph4j</groupId>
+                <artifactId>langgraph4j-studio-springboot</artifactId>
+                <version>${langgraph4j.version}</version>
             </dependency>
             <dependency>
                 <groupId>com.returensea</groupId>

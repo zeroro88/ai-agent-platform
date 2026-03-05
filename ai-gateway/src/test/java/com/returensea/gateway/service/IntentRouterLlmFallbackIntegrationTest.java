@@ -30,7 +30,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 @SpringBootTest(classes = {GatewayTestConfig.class, IntentRouterLlmFallbackIntegrationTest.LlmStubConfig.class})
 @ActiveProfiles("test")
 @TestPropertySource(properties = {
-        "ai.gateway.intent.low-confidence-threshold=0.8"
+        "ai.gateway.intent.low-confidence-threshold=0.8",
+        "ai.gateway.intent.llm.enabled=true"
 })
 @TestExecutionListeners(
         mergeMode = TestExecutionListeners.MergeMode.REPLACE_DEFAULTS,

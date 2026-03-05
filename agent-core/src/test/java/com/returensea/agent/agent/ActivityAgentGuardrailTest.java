@@ -16,6 +16,8 @@ import com.returensea.common.model.AgentResponse;
 import dev.langchain4j.data.message.ChatMessage;
 import dev.langchain4j.model.chat.ChatModel;
 import dev.langchain4j.model.chat.StreamingChatModel;
+import dev.langchain4j.model.chat.response.ChatResponse;
+import dev.langchain4j.model.chat.response.StreamingChatResponseHandler;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -65,14 +67,14 @@ class ActivityAgentGuardrailTest {
     /** 若被调用则说明 guardrail 未拦截，测试应失败 */
     private static final ChatModel NEVER_CALLED_CHAT = new ChatModel() {
         @Override
-        public ChatResponse generate(List<ChatMessage> messages) {
+        public ChatResponse chat(List<ChatMessage> messages) {
             throw new AssertionError("ChatModel should not be called when input guardrail blocks");
         }
     };
 
     private static final StreamingChatModel NEVER_CALLED_STREAM = new StreamingChatModel() {
         @Override
-        public void generate(List<ChatMessage> messages, dev.langchain4j.model.StreamingResponseHandler<dev.langchain4j.model.chat.response.ChatResponse> handler) {
+        public void chat(List<ChatMessage> messages, StreamingChatResponseHandler handler) {
             throw new AssertionError("StreamingChatModel should not be called when input guardrail blocks");
         }
     };

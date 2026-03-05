@@ -1,5 +1,5 @@
 server:
-  port: 8080
+  port: 8081
 
 spring:
   application:
@@ -40,7 +40,7 @@ ai:
       token-expiry-minutes: 60
 
 agent-core:
-  base-url: http://localhost:8081
+  base-url: http://localhost:8080
   connect-timeout: 5000
   read-timeout: 30000
 

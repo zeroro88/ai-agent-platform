@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>海归服务平台 - AI 助手调试（经 Gateway）</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; background-color: #f5f5f5; }
+        .chat-container { background: white; border-radius: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); height: 80vh; display: flex; flex-direction: column; }
+        .chat-header { padding: 15px 20px; border-bottom: 1px solid #eee; font-weight: bold; color: #333; }
+        .chat-messages { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 15px; }
+        .message { max-width: 80%; padding: 10px 15px; border-radius: 10px; line-height: 1.5; white-space: pre-wrap; }
+        .message.user { align-self: flex-end; background-color: #007AFF; color: white; border-bottom-right-radius: 2px; }
+        .message.agent { align-self: flex-start; background-color: #f0f0f0; color: #333; border-bottom-left-radius: 2px; }
+        .message.steps { font-size: 12px; color: #666; background: #f9f9f9; border-left: 3px solid #007AFF; }
+        .error-detail { font-size: 11px; color: #c00; background: #fff5f5; border: 1px solid #fcc; border-radius: 6px; padding: 10px; margin-top: 8px; white-space: pre-wrap; word-break: break-all; text-align: left; max-height: 200px; overflow-y: auto; }
+        .copy-btn { margin-top: 6px; padding: 4px 10px; font-size: 12px; background: #666; color: #fff; border: none; border-radius: 4px; cursor: pointer; }
+        .copy-btn:hover { background: #555; }
+        .quick-replies { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 20px 12px; }
+        .quick-reply { padding: 8px 14px; background: #e8f0fe; color: #1967d2; border-radius: 20px; font-size: 14px; cursor: pointer; border: none; }
+        .quick-reply:hover { background: #d2e3fc; }
+        .chat-input { padding: 20px; border-top: 1px solid #eee; display: flex; gap: 10px; }
+        input { flex: 1; padding: 12px; border: 1px solid #ddd; border-radius: 8px; outline: none; font-size: 16px; }
+        button { padding: 12px 24px; background-color: #007AFF; color: white; border: none; border-radius: 8px; cursor: pointer; font-weight: bold; }
+        button:hover { background-color: #0066cc; }
+        button:disabled { background-color: #ccc; cursor: not-allowed; }
+    </style>
+</head>
+<body>
+    <div class="chat-container">
+        <div class="chat-header">🤖 AI Agent 调试窗口（经 Gateway · 外层调用）</div>
+        <div class="chat-messages" id="messages">
+            <div class="message agent">您好！我是海归服务平台的 AI 助手。本页经 Gateway 调用，会走意图路由等逻辑。请问有什么可以帮您的？</div>
+        </div>
+        <div class="quick-replies" id="quickReplies">
+            <button type="button" class="quick-reply" data-msg="我想报名活动">我想报名活动</button>
+            <button type="button" class="quick-reply" data-msg="推荐一些活动">推荐一些活动</button>
+            <button type="button" class="quick-reply" data-msg="查一下落户政策">查一下落户政策</button>
+        </div>
+        <div class="chat-input">
+            <input type="text" id="userInput" placeholder="输入您的问题..." onkeypress="if(event.keyCode===13) sendMessage()">
+            <button onclick="sendMessage()" id="sendBtn">发送</button>
+        </div>
+    </div>
+
+    <script>
+        const sessionId = localStorage.getItem('agent_demo_session_id') || `web-${Date.now()}`;
+        localStorage.setItem('agent_demo_session_id', sessionId);
+
+        const MAX_NETWORK_RETRIES = 2;
+        const RETRY_DELAY_MS = 1500;
+
+        function isRetryableError(text) {
+            if (!text || typeof text !== 'string') return false;
+            const s = text.toLowerCase();
+            return /connection refused|连接被拒绝|连接失败|暂时无法|rag.*(失败|错误|不可用)|服务.*未启动/.test(s);
+        }
+
+        async function sendMessage(optionalMessage) {
+            const input = document.getElementById('userInput');
+            const btn = document.getElementById('sendBtn');
+            const text = (optionalMessage != null ? String(optionalMessage).trim() : input.value.trim());
+            if (!text) return;
+
+            window._lastSentMessage = text;
+            addMessage(text, 'user');
+            input.value = '';
+            input.disabled = true;
+            btn.disabled = true;
+            const pendingNode = addMessage('正在思考中', 'agent');
+            let loadingDots = 0;
+            const loadingTimer = setInterval(() => {
+                loadingDots = (loadingDots + 1) % 4;
+                pendingNode.textContent = `正在思考中${'.'.repeat(loadingDots)}`;
+            }, 350);
+
+            try {
+                let lastError;
+                for (let attempt = 0; attempt <= MAX_NETWORK_RETRIES; attempt++) {
+                    try {
+                        var response = await fetch('/api/v1/chat/stream', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                sessionId: sessionId,
+                                userId: 'test-user-001',
+                                message: text
+                            })
+                        });
+                        if (!response.ok) throw new Error('API Error ' + response.status);
+                        if (!response.body) throw new Error('No response body');
+                        lastError = null;
+                        break;
+                    } catch (err) {
+                        lastError = err;
+                        if (attempt === MAX_NETWORK_RETRIES) throw err;
+                        pendingNode.textContent = `网络异常，${RETRY_DELAY_MS / 1000} 秒后重试（${attempt + 1}/${MAX_NETWORK_RETRIES + 1}）…`;
+                        await new Promise(r => setTimeout(r, RETRY_DELAY_MS));
+                    }
+                }
+
+                clearInterval(loadingTimer);
+                let firstChunk = true;
+                let streamedRaw = '';
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+                let buffer = '';
+                while (true) {
+                    const { value, done } = await reader.read();
+                    if (done) break;
+                    buffer += decoder.decode(value, { stream: true });
+                    const parts = buffer.split('\n\n');
+                    buffer = parts.pop() || '';
+                    for (const block of parts) {
+                        const line = block.split('\n').find(l => l.startsWith('data:'));
+                        if (!line) continue;
+                        const jsonStr = line.slice(5).trim();
+                        if (!jsonStr) continue;
+                        try {
+                            const event = JSON.parse(jsonStr);
+                            const type = event.type;
+                            const payload = event.payload;
+                            if (type === 'contentDelta' && typeof payload === 'string') {
+                                if (firstChunk) { streamedRaw = ''; firstChunk = false; }
+                                streamedRaw += payload;
+                                pendingNode.textContent = stripToolCallJson(streamedRaw);
+                                pendingNode.scrollIntoView({ behavior: 'smooth' });
+                            } else if (type === 'done' && payload) {
+                                const data = payload;
+                                if (data.processingSteps && data.processingSteps.length > 0) {
+                                    const stepsNode = addMessage('本次处理：' + data.processingSteps.join(' → '), 'agent steps');
+                                    stepsNode.style.marginBottom = '4px';
+                                }
+                                const hasErrorField = data.error || data.errorDetail;
+                                const rawContent = data.content || '';
+                                let displayContent = rawContent;
+                                if (typeof rawContent === 'string' && rawContent.trim().startsWith('{')) {
+                                    try {
+                                        const parsed = JSON.parse(rawContent);
+                                        if (parsed && typeof parsed.text === 'string') displayContent = parsed.text;
+                                    } catch (_) {}
+                                }
+                                if (displayContent && !hasErrorField) {
+                                    pendingNode.textContent = stripToolCallJson(displayContent);
+                                    pendingNode.scrollIntoView({ behavior: 'smooth' });
+                                }
+                                const contentLooksLikeError = /失败|错误|未能成功|遇到.*问题|出现.*问题/.test(rawContent);
+                                const bodyText = data.errorDetail || data.error || (contentLooksLikeError ? rawContent : '');
+                                const traceIdLine = (data.traceId ? 'traceId: ' + data.traceId + '\n（用此 ID 在日志中定位）\n\n' : '');
+                                const textToCopy = traceIdLine + bodyText;
+                                if (hasErrorField || (contentLooksLikeError && bodyText)) {
+                                    const errBlock = document.createElement('div');
+                                    errBlock.className = 'message agent';
+                                    errBlock.style.marginTop = '4px';
+                                    errBlock.innerHTML = '<div class="error-detail">' + escapeHtml(textToCopy) + '</div>' +
+                                        '<button type="button" class="copy-btn" onclick="copyErrorDetail(this)">复制错误详情</button>';
+                                    if (isRetryableError(textToCopy)) {
+                                        const retryBtn = document.createElement('button');
+                                        retryBtn.type = 'button';
+                                        retryBtn.className = 'copy-btn';
+                                        retryBtn.style.marginLeft = '8px';
+                                        retryBtn.textContent = '重试';
+                                        retryBtn.onclick = function () {
+                                            document.getElementById('userInput').value = window._lastSentMessage || '';
+                                            sendMessage(window._lastSentMessage);
+                                        };
+                                        errBlock.appendChild(retryBtn);
+                                    }
+                                    document.getElementById('messages').appendChild(errBlock);
+                                    errBlock.scrollIntoView({ behavior: 'smooth' });
+                                }
+                            } else if (type === 'error' && payload) {
+                                const errMsg = typeof payload.error === 'string' ? payload.error : JSON.stringify(payload);
+                                if (firstChunk) pendingNode.textContent = '';
+                                pendingNode.textContent += (pendingNode.textContent ? '\n' : '') + '错误：' + errMsg;
+                            }
+                        } catch (e) { console.warn('Parse SSE line failed', e); }
+                    }
+                }
+                if (firstChunk && !pendingNode.textContent) {
+                    pendingNode.textContent = '收到响应，但内容为空。';
+                }
+            } catch (error) {
+                clearInterval(loadingTimer);
+                pendingNode.textContent = '抱歉，系统暂时无法响应，请检查后台服务是否启动。';
+                console.error(error);
+            } finally {
+                input.disabled = false;
+                btn.disabled = false;
+                input.focus();
+            }
+        }
+
+        document.querySelectorAll('.quick-reply').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const msg = btn.getAttribute('data-msg');
+                if (msg) { document.getElementById('userInput').value = msg; sendMessage(); }
+            });
+        });
+
+        function escapeHtml(s) {
+            const div = document.createElement('div');
+            div.textContent = s;
+            return div.innerHTML;
+        }
+        function copyErrorDetail(btn) {
+            const block = btn && btn.previousElementSibling ? btn.previousElementSibling : btn.parentElement.querySelector('.error-detail');
+            const text = block ? block.textContent : '';
+            if (!text) return;
+            navigator.clipboard.writeText(text).then(() => alert('已复制到剪贴板')).catch(() => prompt('请手动复制：', text));
+        }
+        function addMessage(text, type) {
+            const div = document.createElement('div');
+            div.className = `message ${type}`;
+            div.textContent = text;
+            document.getElementById('messages').appendChild(div);
+            div.scrollIntoView({ behavior: 'smooth' });
+            return div;
+        }
+        function stripToolCallJson(text) {
+            if (!text || typeof text !== 'string') return '';
+            let s = text;
+            const nameArgStart = /\{\s*"name"\s*:\s*"([^"]+)"\s*,\s*"arguments"\s*:\s*\{/g;
+            let match;
+            while ((match = nameArgStart.exec(s)) !== null) {
+                const start = match.index;
+                const braceStart = s.indexOf('{', start);
+                let depth = 0, end = -1;
+                for (let i = braceStart; i < s.length; i++) {
+                    if (s[i] === '{') depth++;
+                    else if (s[i] === '}') { depth--; if (depth === 0) { end = i; break; } }
+                }
+                if (end === -1) break;
+                const name = match[1];
+                const replacement = (name === 'registerActivity') ? '\n【已提交报名信息】\n' :
+                    (name === 'searchActivities') ? '\n【已查询活动列表】\n' :
+                    (name === 'createActivity') ? '\n【已创建活动】\n' :
+                    (name === 'queryOrder') ? '\n【已查询订单】\n' : '';
+                s = s.slice(0, start) + replacement + s.slice(end + 1);
+                nameArgStart.lastIndex = 0;
+            }
+            return s.replace(/\n{3,}/g, '\n\n').trim();
+        }
+    </script>
+</body>
+</html>
