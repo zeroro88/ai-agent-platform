@@ -8,7 +8,8 @@
             "request": "launch",
             "mainClass": "com.returensea.agent.AgentCoreApplication",
             "projectName": "agent-core",
-            "args": "--spring.profiles.active=middleware"
+            "args": "--spring.profiles.active=middleware",
+            "preLaunchTask": "compile: agent-core"
         },
         {
             "type": "java",
@@ -16,7 +17,8 @@
             "request": "launch",
             "mainClass": "com.returensea.gateway.AiGatewayApplication",
             "projectName": "ai-gateway",
-            "args": "--spring.profiles.active=middleware"
+            "args": "--spring.profiles.active=middleware",
+            "preLaunchTask": "compile: ai-gateway"
         },
         {
             "type": "java",
@@ -24,7 +26,8 @@
             "request": "launch",
             "mainClass": "com.returensea.rag.RagServiceApplication",
             "projectName": "rag-service",
-            "args": "--spring.profiles.active=middleware"
+            "args": "--spring.profiles.active=middleware",
+            "preLaunchTask": "compile: rag-service"
         }
     ]
 }

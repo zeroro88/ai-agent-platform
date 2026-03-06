@@ -5,7 +5,7 @@
 ## 架构概览
 
 ```
-用户 → AI Gateway (8080) → Agent Core (8081) → 领域 Agent + Tool Center
+用户 → AI Gateway (8081) → Agent Core (8080) → 领域 Agent + Tool Center
                                     ↓
               Legacy Dummy (8083) / RAG Service (8082)
 ```
@@ -25,12 +25,12 @@
 
 ## 模块与端口
 
-| 模块         | 端口 | 说明           |
-|--------------|------|----------------|
-| ai-gateway   | 8080 | 网关、路由     |
-| agent-core   | 8081 | Agent 编排     |
-| rag-service  | 8082 | RAG 检索       |
-| legacy-dummy | 8083 | 活动/报名模拟  |
+| 模块         | 端口 | 说明                         |
+|--------------|------|------------------------------|
+| ai-gateway   | 8081 | 网关、路由、调试页 /app、Studio |
+| agent-core   | 8080 | Agent 编排、调试接口         |
+| rag-service  | 8082 | RAG 检索                     |
+| legacy-dummy | 8083 | 活动/报名模拟                |
 
 ## 快速开始
 
@@ -65,10 +65,13 @@ mvn spring-boot:run -pl legacy-dummy -- -Dspring.profiles.active=middleware
 流式聊天（经网关）：
 
 ```bash
-curl -X POST http://localhost:8080/api/v1/chat/stream \
+curl -X POST http://localhost:8081/api/v1/chat/stream \
   -H "Content-Type: application/json" \
   -d '{"message":"推荐上海的活动","sessionId":"test-001","userId":"user-001"}'
 ```
+
+- 调试页（经 Gateway 外层调用）：http://localhost:8081/app/
+- LangGraph Studio（意图路由图调试）：http://localhost:8081/?instance=intent-routing
 
 ## 中间件与集成测试
 
