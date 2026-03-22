@@ -8,6 +8,7 @@ import com.returensea.agent.context.AgentContextHolder;
 import com.returensea.agent.memory.MemoryService;
 import com.returensea.agent.recommend.ActivityRerankService;
 import com.returensea.agent.util.LastActivityIdsSupport;
+import com.returensea.agent.util.RegistrationParsers;
 import lombok.Data;
 import lombok.Builder;
 import lombok.NoArgsConstructor;
@@ -36,6 +37,9 @@ public class ToolExecutor {
 
     @Value("${legacy.service.url:http://localhost:8083}")
     private String legacyServiceUrl;
+
+    /** 与 ActivityAgent 近期轮次一致，用于核对报名姓名手机是否出自用户原话 */
+    private static final int REGISTER_CHECK_RECENT_USER_TURNS = 8;
 
     private final Map<String, ToolHandler> handlers = new HashMap<>();
 
@@ -139,6 +143,66 @@ public class ToolExecutor {
         return memoryService.getWorkingMemory(sessionId, userId)
                 .map(m -> LastActivityIdsSupport.normalize(m.get("lastActivityIds")))
                 .orElse(null);
+    }
+
+    /**
+     * 近期用户侧话术（已落库的会话轮次 + 本轮输入，因 saveToSessionMemory 在整轮结束后才写入）。
+     */
+    private String buildUserBlobForRegisterContactCheck() {
+        StringBuilder sb = new StringBuilder();
+        String sessionId = AgentContextHolder.getSessionId();
+        String userId = AgentContextHolder.getUserId();
+        if (sessionId != null && userId != null) {
+            memoryService.getSessionMemory(sessionId, userId).ifPresent(history -> {
+                int take = Math.min(REGISTER_CHECK_RECENT_USER_TURNS, history.size());
+                for (int i = history.size() - take; i < history.size(); i++) {
+                    Object u = history.get(i).get("user");
+                    if (u != null) {
+                        sb.append(' ').append(u);
+                    }
+                }
+            });
+        }
+        String cur = AgentContextHolder.getCurrentTurnUserMessage();
+        if (cur != null && !cur.isBlank()) {
+            sb.append(' ').append(cur);
+        }
+        return sb.toString().trim();
+    }
+
+    /**
+     * 无任意用户文本上下文时跳过（如单测直接调工具）；有上下文则要求姓名、手机均能在用户原话中核验。
+     */
+    private boolean registerContactMatchesRecentUserText(String name, String phone) {
+        String blob = buildUserBlobForRegisterContactCheck();
+        if (blob.isEmpty()) {
+            return true;
+        }
+        return phoneStatedInUserBlob(blob, phone) && nameStatedInUserBlob(blob, name);
+    }
+
+    private static boolean phoneStatedInUserBlob(String userBlob, String phone) {
+        String p = phone.trim();
+        if (p.isEmpty()) {
+            return false;
+        }
+        String parsed = RegistrationParsers.extractPhone(userBlob);
+        if (parsed != null && parsed.equals(p)) {
+            return true;
+        }
+        return userBlob.contains(p);
+    }
+
+    private static boolean nameStatedInUserBlob(String userBlob, String name) {
+        String n = name.trim();
+        if (n.isEmpty()) {
+            return false;
+        }
+        String parsed = RegistrationParsers.extractName(userBlob);
+        if (parsed != null) {
+            return parsed.equals(n);
+        }
+        return n.length() >= 2 && userBlob.contains(n);
     }
 
     private Object searchActivities(Map<String, Object> params) {
@@ -372,6 +436,14 @@ public class ToolExecutor {
             AgentContextHolder.setErrorDetail("[tool=registerActivity] 姓名或手机号为空，请先向用户收集后再调用\nactivityId="
                     + activityId + "\nparams=" + params);
             return "报名失败。请先向用户确认真实姓名和手机号码，信息齐全后再提交报名。";
+        }
+
+        if (!registerContactMatchesRecentUserText(name, phone)) {
+            log.warn("registerActivity 姓名或手机号与近期用户原话不一致，拒绝调用下游。activityId={}, name={}, phone={}",
+                    activityId, name, phone);
+            AgentContextHolder.setErrorDetail("[tool=registerActivity] 姓名/手机号须在用户原话中出现\nactivityId=" + activityId
+                    + "\nparams=" + params);
+            return "报名失败。请先在对话中由您本人提供并确认姓名与手机号后再报名；不要使用示例或助手猜测的信息。";
         }
 
         log.info("Registering activity via HTTP: activityId={}, name={}, phone={}", activityId, name, phone);

@@ -132,6 +132,25 @@ class ToolExecutorRegisterFlowIT {
      * 必须拒绝下游调用并返回固定话术（否则会误报成功或打到错误活动）。
      */
     @Test
+    void registerActivity_rejectsHallucinatedNamePhoneWhenUserBlobPresent() {
+        AgentContextHolder.set("s-hall", "u-hall");
+        AgentContextHolder.setCurrentTurnUserMessage("就报编号5那场吧");
+        memoryService.setWorkingMemoryKey("s-hall", "u-hall", "lastActivityIds", List.of(42));
+
+        Map<String, Object> reg = new HashMap<>();
+        reg.put("activityId", "42");
+        reg.put("name", "张三");
+        reg.put("phone", "13800138000");
+        reg.put("email", null);
+
+        Object out = toolExecutor.execute("registerActivity", reg);
+
+        assertThat(out.toString()).contains("本人提供");
+        assertThat(AgentContextHolder.getErrorDetail()).contains("用户原话");
+        WM.verify(0, postRequestedFor(urlPathMatching("/api/activities/.*/register")));
+    }
+
+    @Test
     void registerActivity_explicitId_withoutLastIds_rejectsAndDoesNotHitDownstream() {
         AgentContextHolder.set("s-no-list", "u-no-list");
 

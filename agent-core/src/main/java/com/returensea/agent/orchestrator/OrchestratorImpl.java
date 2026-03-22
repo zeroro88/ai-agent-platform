@@ -68,6 +68,7 @@ public class OrchestratorImpl implements Orchestrator {
         try {
             log.info("[{}] Processing request: {}", TraceUtil.getTraceId(), request.getMessage());
             AgentContextHolder.set(request.getSessionId(), request.getUserId());
+            AgentContextHolder.setCurrentTurnUserMessage(request.getMessage());
 
             memoryService.updateWorkingMemory(request.getSessionId(), request.getUserId(), request.getMessage());
             memoryService.removeWorkingMemoryKey(request.getSessionId(), request.getUserId(),
@@ -175,6 +176,7 @@ public class OrchestratorImpl implements Orchestrator {
             streamRequestContextRegistry.bind(boundTrace, request.getSessionId(), request.getUserId());
             log.info("[{}] Processing stream request: {}", TraceUtil.getTraceId(), request.getMessage());
             AgentContextHolder.set(request.getSessionId(), request.getUserId());
+            AgentContextHolder.setCurrentTurnUserMessage(request.getMessage());
             memoryService.updateWorkingMemory(request.getSessionId(), request.getUserId(), request.getMessage());
             memoryService.removeWorkingMemoryKey(request.getSessionId(), request.getUserId(),
                     AgentConstants.WORKING_MEMORY_LAST_RECOMMENDED_ACTIVITIES_JSON);

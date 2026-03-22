@@ -1,7 +1,11 @@
 package com.returensea.gateway.e2e;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.lettuce.core.RedisClient;
+import io.lettuce.core.api.StatefulRedisConnection;
+import io.lettuce.core.api.sync.RedisCommands;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -17,6 +21,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.Map;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -35,10 +40,10 @@ import static org.assertj.core.api.Assertions.assertThat;
  *       （政策 RAG 若用 Milvus：再 {@code up -d milvus} 及依赖）</li>
  *   <li>各服务（建议 {@code middleware} profile，与 README 一致）：
  *       <pre>
- *       mvn spring-boot:run -pl legacy-dummy -- -Dspring.profiles.active=middleware
- *       mvn spring-boot:run -pl rag-service -- -Dspring.profiles.active=middleware
- *       mvn spring-boot:run -pl agent-core -- -Dspring.profiles.active=middleware
- *       mvn spring-boot:run -pl ai-gateway -- -Dspring.profiles.active=middleware
+ *       mvn spring-boot:run -pl legacy-dummy -Dspring-boot.run.profiles=middleware
+ *       mvn spring-boot:run -pl rag-service -Dspring-boot.run.profiles=middleware
+ *       mvn spring-boot:run -pl agent-core -Dspring-boot.run.profiles=middleware
+ *       mvn spring-boot:run -pl ai-gateway -Dspring-boot.run.profiles=middleware
  *       </pre>
  *   </li>
  *   <li>在 agent-core / gateway 中配置好 LLM（如 {@code ai.agent.llm.*}），否则用例会失败或超时。</li>
@@ -57,12 +62,28 @@ import static org.assertj.core.api.Assertions.assertThat;
  * mvn test -Pe2e -pl ai-gateway
  * </pre>
  *
+ * <h3>Redis 与记忆层</h3>
+ * <p>
+ * {@code middleware} 下 agent-core 的 {@code MemoryServiceImpl} 在注入 {@code StringRedisTemplate} 时会将会话、工作记忆、槽位等写入 Redis；
+ * 未连接 Redis 时同一实现退化为进程内 Map。仅「推荐活动」后校验 {@code agent:working} 与 {@code lastActivityIds} 见 {@code journey_recommendShanghai_workingMemory_hasLastActivityIdsInRedis}；
+ * 链路「报名槽位写入 Redis」见 {@code journey_register_partialSlots_persistedInRedis}（需本机可连 Redis，与 agent-core 一致）；
+ * 单元级校验另见 agent-core 的 {@code RedisMemoryIntegrationTest}。
+ * </p>
+ *
  * <p>覆盖「推荐后必须列出活动详情」：用户先问推荐、再答「都可以」时，助手不得只写「推荐了两场」却不展示标题/时间/地点/活动ID。</p>
  */
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class CriticalUserJourneysHttpE2EIT {
 
     private static final int HTTP_READ_TIMEOUT_SECONDS = 180;
+
+    /** 与 agent-core {@code application-middleware.yml} 默认一致；可用 {@code E2E_REDIS_HOST} / {@code E2E_REDIS_PORT} 覆盖。 */
+    private static final String REDIS_HOST = firstNonBlank(
+            System.getenv("E2E_REDIS_HOST"),
+            System.getProperty("e2e.redis.host"),
+            "localhost");
+    private static final int REDIS_PORT = parsePort(
+            firstNonBlank(System.getenv("E2E_REDIS_PORT"), System.getProperty("e2e.redis.port"), "6379"));
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static HttpClient HTTP_CLIENT;
@@ -161,6 +182,107 @@ class CriticalUserJourneysHttpE2EIT {
 
     @Test
     @Order(3)
+    @DisplayName("链路2a：推荐上海活动 → Redis 工作记忆含 lastActivityIds")
+    void journey_recommendShanghai_workingMemory_hasLastActivityIdsInRedis() throws Exception {
+        assumeRedisReachableForE2e();
+
+        String session = "e2e-redis-working-" + UUID.randomUUID();
+        String user = "e2e-user";
+        String workingKey = "agent:working:" + session + ":" + user;
+
+        JsonNode r1 = postChat(session, user, "推荐上海的活动");
+        assertSoftlyNoHardError(r1);
+        assertThat(displayText(r1)).isNotBlank();
+
+        String raw = readRawFromRedis(workingKey);
+        assertThat(raw)
+                .as("搜活动后应写入工作记忆（键=%s）", workingKey)
+                .isNotBlank();
+
+        JsonNode wm = MAPPER.readTree(raw);
+        JsonNode lastIds = wm.get("lastActivityIds");
+        assertThat(lastIds)
+                .as("工作记忆应含 lastActivityIds")
+                .isNotNull();
+        assertThat(lastIds.isArray())
+                .as("lastActivityIds 应为 JSON 数组")
+                .isTrue();
+        assertThat(lastIds.size())
+                .as("searchActivities 成功后应至少有一条推荐活动 ID")
+                .isGreaterThan(0);
+
+        assertThat(raw)
+                .as("updateWorkingMemory 应追加用户原文")
+                .contains("推荐上海");
+    }
+
+    @Test
+    @Order(4)
+    @DisplayName("链路2b：推荐 → 分轮报名 → Redis 槽位含活动/手机/姓名；会话键含原文")
+    void journey_register_partialSlots_persistedInRedis() throws Exception {
+        assumeRedisReachableForE2e();
+
+        String session = "e2e-redis-reg-" + UUID.randomUUID();
+        String user = "e2e-user";
+        String slotsKey = "agent:slots:" + session + ":" + user + ":ACTIVITY_REGISTER";
+        String sessionKey = "agent:session:" + session + ":" + user;
+
+        JsonNode r1 = postChat(session, user, "推荐上海的活动");
+        assertSoftlyNoHardError(r1);
+        assertThat(displayText(r1)).isNotBlank();
+
+        JsonNode r2 = postChat(session, user, "我要报名刚才推荐里第一个活动");
+        assertSoftlyNoHardError(r2);
+        assertThat(displayText(r2)).isNotBlank();
+
+        Map<String, Object> afterPick = readSlotStateFromRedis(slotsKey);
+        assertThat(afterPick)
+                .as("middleware 下未完成报名时应把已填槽位写入 Redis（键=%s）", slotsKey)
+                .isNotEmpty();
+        assertThat(stringSlot(afterPick, "activityId"))
+                .as("首轮报名应已解析活动 ID 并写入 Redis")
+                .isNotBlank();
+
+        JsonNode r3 = postChat(session, user, "手机13900009988");
+        assertSoftlyNoHardError(r3);
+        assertThat(displayText(r3)).isNotBlank();
+
+        Map<String, Object> afterPhone = readSlotStateFromRedis(slotsKey);
+        assertThat(stringSlot(afterPhone, "phone"))
+                .as("单独提供手机号后 Redis 槽位应含 phone")
+                .contains("13900009988");
+        assertThat(stringSlot(afterPhone, "activityId"))
+                .as("槽位状态应保留 activityId")
+                .isNotBlank();
+
+        JsonNode r4 = postChat(session, user, "姓名赵六");
+        assertSoftlyNoHardError(r4);
+        String t4 = displayText(r4);
+        assertThat(t4)
+                .as("补全姓名后应完成报名语义")
+                .doesNotContain("无最近推荐列表")
+                .doesNotContain("请先让助手推荐活动");
+        assertThat(t4)
+                .satisfiesAnyOf(
+                        text -> assertThat(text).containsIgnoringCase("成功"),
+                        text -> assertThat(text).contains("报名"),
+                        text -> assertThat(text).contains("已"),
+                        text -> assertThat(text).contains("完成"));
+
+        Map<String, Object> afterDone = readSlotStateFromRedis(slotsKey);
+        assertThat(afterDone)
+                .as("槽位已满并执行报名后 Orchestrator 会 clearSlotState，Redis 中应为空 map")
+                .isEmpty();
+
+        String sessionBlob = readRawFromRedis(sessionKey);
+        assertThat(sessionBlob)
+                .as("每轮对话会写入 agent:session（含用户原文），应能检索到姓名与手机号")
+                .contains("赵六")
+                .contains("13900009988");
+    }
+
+    @Test
+    @Order(5)
     @DisplayName("链路3：推荐 →「都可以」→ 回复须含具体活动信息（非只概括场数）")
     void journey_recommendThenVaguePreference_mustShowActivityDetails() throws Exception {
         String session = "e2e-rec-detail-" + UUID.randomUUID();
@@ -188,7 +310,7 @@ class CriticalUserJourneysHttpE2EIT {
     }
 
     @Test
-    @Order(4)
+    @Order(6)
     @DisplayName("链路4：政策咨询 → 返回答案（非知识库不可用）")
     void journey_policyConsultation_returnsAnswer() throws Exception {
         String session = "e2e-policy-" + UUID.randomUUID();
@@ -264,6 +386,64 @@ class CriticalUserJourneysHttpE2EIT {
             assertThat(err.asText())
                     .as("ChatResponse.error 应为空，实际=" + err.asText())
                     .isBlank();
+        }
+    }
+
+    private static void assumeRedisReachableForE2e() {
+        try (RedisClient client = RedisClient.create("redis://" + REDIS_HOST + ":" + REDIS_PORT);
+             StatefulRedisConnection<String, String> conn = client.connect()) {
+            conn.sync().ping();
+        } catch (Exception e) {
+            Assumptions.abort("跳过 Redis 槽位断言：无法连接 Redis " + REDIS_HOST + ":" + REDIS_PORT
+                    + "（请 docker compose up -d redis，且 agent-core 使用 middleware）。原因: " + e.getMessage());
+        }
+    }
+
+    private static Map<String, Object> readSlotStateFromRedis(String key) throws Exception {
+        String raw = readRawFromRedis(key);
+        if (raw.isBlank()) {
+            return Map.of();
+        }
+        return MAPPER.readValue(raw, new TypeReference<>() {});
+    }
+
+    private static String readRawFromRedis(String key) {
+        try (RedisClient client = RedisClient.create("redis://" + REDIS_HOST + ":" + REDIS_PORT);
+             StatefulRedisConnection<String, String> conn = client.connect()) {
+            RedisCommands<String, String> sync = conn.sync();
+            String raw = sync.get(key);
+            return raw != null ? raw : "";
+        }
+    }
+
+    private static String stringSlot(Map<String, Object> slots, String field) {
+        if (slots == null) {
+            return "";
+        }
+        Object v = slots.get(field);
+        if (v == null) {
+            return "";
+        }
+        return v.toString().trim();
+    }
+
+    private static String firstNonBlank(String... parts) {
+        if (parts == null) {
+            return "";
+        }
+        for (String p : parts) {
+            if (p != null && !p.isBlank()) {
+                return p.trim();
+            }
+        }
+        return "";
+    }
+
+    private static int parsePort(String s) {
+        try {
+            return Integer.parseInt(s.trim());
+        } catch (Exception e) {
+            return 6379;
         }
     }
 }

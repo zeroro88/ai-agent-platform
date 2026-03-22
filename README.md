@@ -21,7 +21,7 @@
 - LangChain4j（Agent 编排、LLM 调用、Embedding）
 - LLM：Ollama / DeepSeek（OpenAI 兼容）
 - **Profile**：默认 `local`（无中间件强依赖）；`middleware` 下使用 Redis / MySQL / Milvus 真实接入
-- 记忆：Working（进程内）；Session/槽位（local 内存，middleware 用 Redis）；长时/向量（local 内存，middleware 用 Milvus）
+- 记忆：`MemoryServiceImpl` 在 **无 Redis** 时退化为进程内 `ConcurrentHashMap`；**middleware** 且 Redis 可用时，Working / Session / 用户画像 / 长时记忆列表 / 槽位等键值均写入 Redis（键前缀 `agent:working:`、`agent:session:` 等）。长时向量检索在 middleware 下另接 Milvus（可选）。
 
 ## 模块与端口
 
@@ -55,12 +55,14 @@ mvn spring-boot:run -pl legacy-dummy
 docker compose -f docker/docker-compose.yml up -d mysql redis    # 活动/报名 + 记忆
 docker compose -f docker/docker-compose.yml up -d milvus         # 可选：RAG 向量库
 
-# 2. 以 middleware profile 启动各服务
-mvn spring-boot:run -pl ai-gateway -- -Dspring.profiles.active=middleware
-mvn spring-boot:run -pl agent-core -- -Dspring.profiles.active=middleware
-mvn spring-boot:run -pl rag-service -- -Dspring.profiles.active=middleware
-mvn spring-boot:run -pl legacy-dummy -- -Dspring.profiles.active=middleware
+# 2. 以 middleware profile 启动各服务（用 spring-boot 插件参数，避免 Maven 误解析）
+mvn spring-boot:run -pl ai-gateway -Dspring-boot.run.profiles=middleware
+mvn spring-boot:run -pl agent-core -Dspring-boot.run.profiles=middleware
+mvn spring-boot:run -pl rag-service -Dspring-boot.run.profiles=middleware
+mvn spring-boot:run -pl legacy-dummy -Dspring-boot.run.profiles=middleware
 ```
+
+**重要：** 请使用 **`-Dspring-boot.run.profiles=middleware`**。不要写 `mvn ... -Dspring.profiles.active=middleware`（该 `-D` 只作用于 Maven，应用常仍落在默认 **`local`**）；也不要写 `mvn ... -- -Dspring.profiles.active=...`（`--` 后内容常被 Maven 当成生命周期阶段，会报 `Unknown lifecycle phase`）。
 
 流式聊天（经网关）：
 
@@ -100,6 +102,7 @@ mvn test -Dspring.profiles.active=middleware
   `mvn test -Pe2e -pl ai-gateway`
 - **网关地址**：环境变量 `E2E_GATEWAY_BASE_URL` 或 `-De2e.gateway.baseUrl=...`（默认 `http://localhost:8081`）
 - **Surefire**：父 POM 默认排除测试路径 `**/e2e/**`；`-Pe2e` 仅在 `ai-gateway` 中改为只包含 `e2e` 包下用例
+- **Redis**：[`CriticalUserJourneysHttpE2EIT`](ai-gateway/src/test/java/com/returensea/gateway/e2e/CriticalUserJourneysHttpE2EIT.java) 中「链路2b」在 agent-core 使用 **middleware** 且本机可连 Redis 时，用 Lettuce 读取 `agent:slots:…:ACTIVITY_REGISTER` 与 `agent:session:…` 校验报名槽位与会话原文（姓名/手机）。地址覆盖：`E2E_REDIS_HOST`、`E2E_REDIS_PORT`（默认 `localhost:6379`）。连不上 Redis 时该用例会 **跳过**（Assumptions）。单元级校验另见 [`RedisMemoryIntegrationTest`](agent-core/src/test/java/com/returensea/agent/memory/RedisMemoryIntegrationTest.java)。
 
 ## 故障排查
 
@@ -113,7 +116,7 @@ mvn test -Dspring.profiles.active=middleware
 
 - **双轨**：快轨（Agent 对话/推荐/咨询）+ 慢轨（传统 API 如报名）。
 - **权限 L0–L3**：L0 自动执行，L1 建议+确认，L2 二次确认（如报名），L3 禁止自动执行。
-- **三层记忆**：Working（进程内）、Session/槽位（local 内存 / middleware Redis）、Long-term（local 内存向量 / middleware 可选 Milvus）。
+- **三层记忆**：键值层（Working、Session、画像、长时列表、槽位）在 local 为进程内；middleware 下经 Redis。长时向量检索在 middleware 下可选 Milvus。
 - **工具**：searchActivities、getActivityDetail、registerActivity、createActivity、queryOrder（通过 HTTP 调 legacy-dummy）。
 - **RAG**：rag-service 提供向量检索与引用；agent-core 可调用其接口。
 - **Slot 填槽**：ACTIVITY_REGISTER 等意图的结构化参数提取。

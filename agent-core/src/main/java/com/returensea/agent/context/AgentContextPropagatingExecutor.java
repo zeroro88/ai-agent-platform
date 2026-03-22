@@ -28,6 +28,7 @@ public final class AgentContextPropagatingExecutor implements Executor {
     public void execute(Runnable command) {
         String sessionId = AgentContextHolder.getSessionId();
         String userId = AgentContextHolder.getUserId();
+        String currentTurnUserMessage = AgentContextHolder.getCurrentTurnUserMessage();
         Map<String, String> mdcSnapshot = MDC.getCopyOfContextMap();
 
         String traceScratch = TraceUtil.getTraceId();
@@ -54,6 +55,7 @@ public final class AgentContextPropagatingExecutor implements Executor {
 
         final String effSessionId = sessionId;
         final String effUserId = userId;
+        final String effCurrentTurnUserMessage = currentTurnUserMessage;
         final Map<String, String> mdcCopy = mdcSnapshot;
 
         delegate.execute(() -> {
@@ -61,6 +63,7 @@ public final class AgentContextPropagatingExecutor implements Executor {
             try {
                 if (effSessionId != null && effUserId != null) {
                     AgentContextHolder.set(effSessionId, effUserId);
+                    AgentContextHolder.setCurrentTurnUserMessage(effCurrentTurnUserMessage);
                 }
                 if (mdcCopy != null && !mdcCopy.isEmpty()) {
                     MDC.setContextMap(mdcCopy);
