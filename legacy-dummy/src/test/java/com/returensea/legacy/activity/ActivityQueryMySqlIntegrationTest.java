@@ -28,6 +28,28 @@ class ActivityQueryMySqlIntegrationTest {
     private TestRestTemplate restTemplate;
 
     @Test
+    @DisplayName("按「上海」筛选：location 含上海时应返回行（验证 JdbcTemplate query(sql, Object[], RowMapper) 绑定）")
+    void list_byCity_shanghai_shouldReturnNonEmpty() {
+        String title = "中间件测试活动-上海筛选-" + System.currentTimeMillis();
+        jdbcTemplate.update("DELETE FROM activity WHERE title = ?", title);
+        jdbcTemplate.update("""
+                INSERT INTO activity(title, description, location, start_time, end_time, status, price)
+                VALUES (?, ?, '上海市浦东新区', NOW(), DATE_ADD(NOW(), INTERVAL 2 HOUR), 0, 0.00)
+                """, title, "集成测试描述");
+        ResponseEntity<List<Map<String, Object>>> response = restTemplate.exchange(
+                "/api/activities?city=上海",
+                HttpMethod.GET,
+                null,
+                new ParameterizedTypeReference<>() {});
+        List<Map<String, Object>> activities = response.getBody();
+
+        assertThat(activities).isNotNull();
+        assertThat(activities).isNotEmpty();
+        assertThat(activities)
+                .anyMatch(a -> title.equals(String.valueOf(a.get("title"))));
+    }
+
+    @Test
     @DisplayName("middleware 下活动查询应命中 MySQL 初始化数据")
     void list_shouldReadFromMySql() {
         long id = seedTestActivity("中间件测试活动-查询");

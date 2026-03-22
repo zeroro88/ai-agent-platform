@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.returensea.agent.context.AgentContextHolder;
 import com.returensea.agent.memory.MemoryService;
 import com.returensea.agent.recommend.ActivityRerankService;
+import com.returensea.agent.util.LastActivityIdsSupport;
 import lombok.Data;
 import lombok.Builder;
 import lombok.NoArgsConstructor;
@@ -14,7 +15,9 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.*;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestTemplate;
+import org.springframework.web.util.UriComponentsBuilder;
 
+import java.net.URI;
 import java.util.*;
 import java.util.stream.Collectors;
 
@@ -74,39 +77,64 @@ public class ToolExecutor {
         return sb.toString();
     }
 
-    /** 若 activityId 为 "1"/"2" 等序号，从当前会话的 lastActivityIds 解析为真实活动 ID */
+    /**
+     * 解析用户/模型传入的 activityId：
+     * - 纯数字既可能是「第 N 条推荐」也可能是 MySQL 数字主键（如 26）；若该数字在 lastActivityIds 中且不等于第 N 位真实 ID，则按字面 ID。
+     * - 超出序号范围但在列表中的数字，按字面活动 ID。
+     * - 过长纯数字使用 Long 解析，避免 Integer 溢出或抛异常（如标题内毫秒时间戳）。
+     */
     private String resolveActivityIdFromSelection(String activityId) {
         if (activityId == null || activityId.startsWith("act-")) return activityId;
         String trimmed = activityId.trim();
         if (!trimmed.matches("\\d+")) return activityId;
-        int index = Integer.parseInt(trimmed, 10);
-        if (index < 1) return activityId;
-        String sessionId = AgentContextHolder.getSessionId();
-        String userId = AgentContextHolder.getUserId();
-        if (sessionId == null || userId == null) return activityId;
-        @SuppressWarnings("unchecked")
-        List<String> ids = memoryService.getWorkingMemory(sessionId, userId)
-                .map(m -> m.get("lastActivityIds"))
-                .filter(List.class::isInstance)
-                .map(list -> (List<String>) list)
-                .orElse(null);
-        if (ids != null && index <= ids.size()) {
-            String resolved = ids.get(index - 1);
-            log.info("Resolved activityId selection '{}' -> {}", activityId, resolved);
-            return resolved;
+        List<String> ids = getLastActivityIdsFromContext();
+        if (ids == null || ids.isEmpty()) {
+            return activityId;
         }
-        return activityId;
+        long nLong;
+        try {
+            nLong = Long.parseLong(trimmed, 10);
+        } catch (NumberFormatException e) {
+            return activityId;
+        }
+        if (nLong < 1) {
+            return activityId;
+        }
+        if (nLong > ids.size()) {
+            if (ids.contains(trimmed)) {
+                log.info("Resolved activityId as literal (numeric > list size): {}", trimmed);
+                return trimmed;
+            }
+            return activityId;
+        }
+        if (nLong > Integer.MAX_VALUE) {
+            return ids.contains(trimmed) ? trimmed : activityId;
+        }
+        int n = (int) nLong;
+        String byOrdinal = ids.get(n - 1);
+        if (ids.contains(trimmed) && !trimmed.equals(byOrdinal)) {
+            log.info("Resolved activityId as literal (in list, differs from ordinal {}): {} -> {}", n, activityId, trimmed);
+            return trimmed;
+        }
+        log.info("Resolved activityId selection '{}' -> {} (ordinal {})", activityId, byOrdinal, n);
+        return byOrdinal;
     }
 
-    @SuppressWarnings("unchecked")
+    /** 标题里常见的时间戳后缀（11 位秒级～13 位毫秒级），勿当作系统活动 ID */
+    private static boolean looksLikeTitleEmbeddedNumber(String activityId) {
+        if (activityId == null) return false;
+        String t = activityId.trim();
+        return t.matches("\\d{11,}");
+    }
+
     private List<String> getLastActivityIdsFromContext() {
         String sessionId = AgentContextHolder.getSessionId();
         String userId = AgentContextHolder.getUserId();
-        if (sessionId == null || userId == null) return null;
+        if (sessionId == null || userId == null) {
+            return null;
+        }
         return memoryService.getWorkingMemory(sessionId, userId)
-                .map(m -> m.get("lastActivityIds"))
-                .filter(List.class::isInstance)
-                .map(list -> (List<String>) list)
+                .map(m -> LastActivityIdsSupport.normalize(m.get("lastActivityIds")))
                 .orElse(null);
     }
 
@@ -114,26 +142,30 @@ public class ToolExecutor {
         String city = (String) params.getOrDefault("city", "");
         String keyword = (String) params.getOrDefault("keyword", "");
 
-        log.info("Searching activities via HTTP: city={}, keyword={}", city, keyword);
+        log.info("searchActivities start: legacyBaseUrl={}, city={}, keyword={}", legacyServiceUrl, city, keyword);
+        long t0 = System.nanoTime();
 
         try {
-            String url = legacyServiceUrl + "/api/activities";
-            StringBuilder queryParams = new StringBuilder();
-            if (city != null && !city.isEmpty()) {
-                queryParams.append("city=").append(city);
+            UriComponentsBuilder uriBuilder = UriComponentsBuilder
+                    .fromHttpUrl(legacyServiceUrl + "/api/activities");
+            if (city != null && !city.isBlank()) {
+                uriBuilder.queryParam("city", city.trim());
             }
-            if (keyword != null && !keyword.isEmpty()) {
-                if (queryParams.length() > 0) queryParams.append("&");
-                queryParams.append("keyword=").append(keyword);
+            if (keyword != null && !keyword.isBlank()) {
+                uriBuilder.queryParam("keyword", keyword.trim());
             }
-            if (queryParams.length() > 0) {
-                url += "?" + queryParams;
-            }
+            URI uri = uriBuilder.encode().build().toUri();
+            log.info("searchActivities calling legacy GET {}", uri);
 
-            ResponseEntity<Activity[]> response = restTemplate.getForEntity(url, Activity[].class);
+            long tLegacyStart = System.nanoTime();
+            ResponseEntity<Activity[]> response = restTemplate.getForEntity(uri, Activity[].class);
+            long legacyMs = (System.nanoTime() - tLegacyStart) / 1_000_000;
             Activity[] activities = response.getBody();
+            log.info("searchActivities legacy responded: status={}, bodyCount={}, tookMs={}",
+                    response.getStatusCode(), activities == null ? 0 : activities.length, legacyMs);
 
             if (activities == null || activities.length == 0) {
+                log.info("searchActivities done (empty): totalMs={}", (System.nanoTime() - t0) / 1_000_000);
                 return "未找到符合条件的活动。";
             }
 
@@ -147,7 +179,11 @@ public class ToolExecutor {
                     .toList();
             String userContext = "城市: " + (city != null ? city : "不限") + "; 关键词: " + (keyword != null ? keyword : "无");
             int topK = Math.min(10, candidates.size());
+            long tRerankStart = System.nanoTime();
             List<ActivityRerankService.RerankedActivity> reranked = activityRerankService.rerankWithReasons(candidates, userContext, topK);
+            long rerankMs = (System.nanoTime() - tRerankStart) / 1_000_000;
+            log.info("searchActivities rerank done: candidates={}, rerankedSize={}, rerankTookMs={}",
+                    candidates.size(), reranked.size(), rerankMs);
 
             List<String> activityIds = reranked.stream().map(ActivityRerankService.RerankedActivity::id).toList();
             String sessionId = AgentContextHolder.getSessionId();
@@ -159,11 +195,16 @@ public class ToolExecutor {
 
             Map<String, Activity> byId = Arrays.stream(activities).filter(a -> a.getId() != null).collect(Collectors.toMap(Activity::getId, a -> a, (a, b) -> a));
             StringBuilder result = new StringBuilder("根据您的需求，我为您精选并排序了以下活动：\n\n");
+            int appended = 0;
             for (int i = 0; i < reranked.size(); i++) {
                 ActivityRerankService.RerankedActivity r = reranked.get(i);
                 Activity a = byId.get(r.id());
-                if (a == null) continue;
-                result.append(i + 1).append(". 【").append(a.getCity()).append("】").append(a.getTitle()).append("\n");
+                if (a == null) {
+                    log.warn("Rerank id {} not in byId keys {}, skip line", r.id(), byId.keySet());
+                    continue;
+                }
+                appended++;
+                result.append(appended).append(". 【").append(a.getCity()).append("】").append(a.getTitle()).append("\n");
                 result.append("   推荐理由：").append(r.reason()).append("\n");
                 result.append("   时间：").append(a.getEventTime()).append("\n");
                 result.append("   地点：").append(a.getLocation()).append("\n");
@@ -171,12 +212,33 @@ public class ToolExecutor {
                 if (a.getRegistered() != null) {
                     result.append("（已报名").append(a.getRegistered()).append("人）");
                 }
-                result.append("\n\n");
+                result.append("\n");
+                result.append("   活动ID（报名 registerActivity 必填）：").append(a.getId()).append("\n\n");
             }
+            // 重排 ID 与 JSON 反序列化 id 不一致时，避免出现「只有标题无列表」导致模型误判为无活动
+            int displayLines = appended;
+            if (appended == 0 && activities.length > 0) {
+                log.warn("No activities appended after rerank; falling back to plain list (count={})", activities.length);
+                int n = Math.min(10, activities.length);
+                int line = 0;
+                for (int i = 0; i < n; i++) {
+                    Activity a = activities[i];
+                    if (a == null || a.getId() == null) {
+                        continue;
+                    }
+                    line++;
+                    result.append(line).append(". 【").append(nullToEmpty(a.getCity())).append("】").append(nullToEmpty(a.getTitle())).append("\n");
+                    result.append("   时间：").append(nullToEmpty(a.getEventTime())).append("\n");
+                    result.append("   地点：").append(nullToEmpty(a.getLocation())).append("\n");
+                    result.append("   活动ID（报名 registerActivity 必填）：").append(a.getId()).append("\n\n");
+                }
+                displayLines = line;
+            }
+            log.info("searchActivities success: totalMs={}, displayLines={}", (System.nanoTime() - t0) / 1_000_000, displayLines);
             return result.toString();
 
         } catch (Exception e) {
-            log.error("Error calling legacy service: {}", e.getMessage());
+            log.error("searchActivities failed afterMs={}: {}", (System.nanoTime() - t0) / 1_000_000, e.getMessage(), e);
             return "查询活动失败，请稍后重试。错误：" + e.getMessage();
         }
     }
@@ -245,7 +307,10 @@ public class ToolExecutor {
             return "报名失败。请先让助手推荐活动，再选择要报名的活动（如回复 1 或活动 ID：act-xxx）。";
         }
         if (!lastIds.contains(activityId)) {
-            String msg = "活动 ID 不在当前候选列表中，请从最近推荐的活动里选择（如回复 1、2 或活动 ID：act-xxx）。当前候选 ID：" + String.join(", ", lastIds);
+            String msg = "活动 ID 不在当前候选列表中，请从最近推荐的活动里选择（如回复 1、2 或使用「活动ID（报名必填）」中的数字）。当前候选 ID：" + String.join(", ", lastIds);
+            if (looksLikeTitleEmbeddedNumber(activityId)) {
+                msg += " 提示：您填写的长数字很像活动标题里的后缀（如时间戳），不是报名用的活动 ID；请勿从标题中抄数字。";
+            }
             log.warn("registerActivity 拒绝非候选 ID: activityId={}, lastActivityIds={}", activityId, lastIds);
             AgentContextHolder.setErrorDetail("[tool=registerActivity] " + msg + "\n传入的 activityId=" + params.get("activityId"));
             return "报名失败。" + msg;
@@ -421,6 +486,10 @@ public class ToolExecutor {
         } catch (Exception e) {
             return defaultValue;
         }
+    }
+
+    private static String nullToEmpty(String s) {
+        return s != null ? s : "";
     }
 
     @FunctionalInterface

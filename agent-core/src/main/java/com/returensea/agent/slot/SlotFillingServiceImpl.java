@@ -1,6 +1,8 @@
 package com.returensea.agent.slot;
 
 import com.returensea.agent.memory.MemoryService;
+import com.returensea.agent.util.LastActivityIdsSupport;
+import com.returensea.agent.util.RegistrationParsers;
 import com.returensea.common.model.SlotDefinition;
 import com.returensea.common.model.SlotFillingRequest;
 import com.returensea.common.model.SlotFillingResult;
@@ -197,12 +199,7 @@ public class SlotFillingServiceImpl implements SlotFillingService {
     }
 
     private String extractPhone(String text) {
-        Pattern pattern = Pattern.compile("1[3-9]\\d{9}");
-        Matcher matcher = pattern.matcher(text);
-        if (matcher.find()) {
-            return matcher.group();
-        }
-        return null;
+        return RegistrationParsers.extractPhone(text);
     }
 
     private String extractEmail(String text) {
@@ -215,10 +212,17 @@ public class SlotFillingServiceImpl implements SlotFillingService {
     }
 
     private String extractName(String text) {
+        String parsed = RegistrationParsers.extractName(text);
+        if (parsed != null) {
+            return parsed;
+        }
         String[] parts = text.split("[，。,\\.]");
         for (String part : parts) {
-            if (part.contains("我叫") || part.contains("姓名") || part.contains("我叫")) {
-                return part.replaceAll(".*叫", "").replace("姓名", "").trim();
+            if (part.contains("我叫") || part.contains("姓名")) {
+                String s = part.replaceAll(".*叫", "").replace("姓名", "").replaceAll("[:：]", "").trim();
+                if (!s.isEmpty()) {
+                    return s;
+                }
             }
         }
         return null;
@@ -228,21 +232,74 @@ public class SlotFillingServiceImpl implements SlotFillingService {
         if (text == null) return null;
         String trimmed = text.trim();
 
-        Pattern pattern = Pattern.compile("act-\\d+");
-        Matcher matcher = pattern.matcher(trimmed);
-        if (matcher.find()) {
-            return matcher.group();
+        Matcher actMatcher = Pattern.compile("act-\\d+").matcher(text);
+        if (actMatcher.find()) {
+            return actMatcher.group();
+        }
+        // 整句里的「活动id：1」「活动 ID：28」
+        Matcher idInSentence = Pattern.compile("活动\\s*[Ii][Dd]?\\s*[:：\\s]\\s*(\\d+)", Pattern.CASE_INSENSITIVE).matcher(text);
+        if (idInSentence.find()) {
+            return resolveActivityIdDigits(idInSentence.group(1), sessionId, userId);
+        }
+        Matcher numLabel = Pattern.compile("编号\\s*[:：]?\\s*(\\d+)").matcher(text);
+        if (numLabel.find()) {
+            return resolveActivityIdDigits(numLabel.group(1), sessionId, userId);
+        }
+        Matcher ordinalNum = Pattern.compile("第\\s*(\\d+)\\s*个").matcher(text);
+        if (ordinalNum.find()) {
+            return resolveActivityIdDigits(ordinalNum.group(1).trim(), sessionId, userId);
+        }
+        Matcher ordinalZh = Pattern.compile("第\\s*([一二三四五六七八九十两]+)\\s*个").matcher(text);
+        if (ordinalZh.find()) {
+            int n = RegistrationParsers.chineseOrdinalToInt(ordinalZh.group(1).trim());
+            if (n > 0) {
+                return resolveActivityIdDigits(String.valueOf(n), sessionId, userId);
+            }
         }
 
-        // 解析「1」「2」「第一个」「报名第一个」等为最近一次活动列表中的序号
+        // 解析「1」「2」「第一个」「报名第一个」等为最近一次活动列表中的序号（整句仅为数字时）
         int index = parseOrdinalSelection(trimmed);
         if (index >= 0 && sessionId != null && userId != null) {
             List<String> lastIds = getLastActivityIds(sessionId, userId);
             if (lastIds != null && index < lastIds.size()) {
                 String resolved = lastIds.get(index);
+                if (trimmed.matches("\\d+") && lastIds.contains(trimmed) && !trimmed.equals(resolved)) {
+                    log.debug("Resolved selection '{}' as literal activityId (not ordinal)", trimmed);
+                    return trimmed;
+                }
                 log.debug("Resolved selection '{}' -> activityId {}", trimmed, resolved);
                 return resolved;
             }
+        }
+        if (trimmed.matches("\\d+") && sessionId != null && userId != null) {
+            List<String> lastIds = getLastActivityIds(sessionId, userId);
+            if (lastIds != null && lastIds.contains(trimmed)) {
+                return trimmed;
+            }
+        }
+        return null;
+    }
+
+    /** 将一串数字解析为「第几项」或字面活动主键（依赖 lastActivityIds） */
+    private String resolveActivityIdDigits(String digits, String sessionId, String userId) {
+        if (digits == null || sessionId == null || userId == null) {
+            return null;
+        }
+        String trimmed = digits.trim();
+        int index = parseOrdinalSelection(trimmed);
+        List<String> lastIds = getLastActivityIds(sessionId, userId);
+        if (lastIds == null || lastIds.isEmpty()) {
+            return null;
+        }
+        if (index >= 0 && index < lastIds.size()) {
+            String resolved = lastIds.get(index);
+            if (trimmed.matches("\\d+") && lastIds.contains(trimmed) && !trimmed.equals(resolved)) {
+                return trimmed;
+            }
+            return resolved;
+        }
+        if (trimmed.matches("\\d+") && lastIds.contains(trimmed)) {
+            return trimmed;
         }
         return null;
     }
@@ -252,8 +309,15 @@ public class SlotFillingServiceImpl implements SlotFillingService {
         if (text == null || text.isEmpty()) return -1;
         String t = text.trim();
         if (t.matches("\\d+")) {
-            int n = Integer.parseInt(t, 10);
-            return n >= 1 ? n - 1 : -1;
+            // 过长数字视为非「第几项」（避免 Integer 溢出；多为标题内时间戳）
+            if (t.length() > 9) {
+                return -1;
+            }
+            long n = Long.parseLong(t, 10);
+            if (n < 1 || n > Integer.MAX_VALUE) {
+                return -1;
+            }
+            return (int) n - 1;
         }
         if (t.contains("第一个") || t.equals("一") || t.matches("报名\\s*1")) return 0;
         if (t.contains("第二个") || t.equals("二") || t.matches("报名\\s*2")) return 1;
@@ -271,12 +335,9 @@ public class SlotFillingServiceImpl implements SlotFillingService {
         return -1;
     }
 
-    @SuppressWarnings("unchecked")
     private List<String> getLastActivityIds(String sessionId, String userId) {
         return memoryService.getWorkingMemory(sessionId, userId)
-                .map(m -> m.get("lastActivityIds"))
-                .filter(List.class::isInstance)
-                .map(list -> (List<String>) list)
+                .map(m -> LastActivityIdsSupport.normalize(m.get("lastActivityIds")))
                 .orElse(null);
     }
 

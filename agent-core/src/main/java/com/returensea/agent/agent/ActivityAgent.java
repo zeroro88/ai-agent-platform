@@ -1,8 +1,12 @@
 package com.returensea.agent.agent;
 
+import com.returensea.agent.config.LangChainStreamingExecutorConfig;
+import com.returensea.agent.context.AgentContextHolder;
 import com.returensea.agent.guardrail.BannedContentInputGuardrail;
 import com.returensea.agent.memory.MemoryService;
 import com.returensea.agent.tool.ToolCenter;
+import com.returensea.agent.util.LastActivityIdsSupport;
+import com.returensea.agent.util.RegistrationParsers;
 import com.returensea.common.enums.AgentType;
 import com.returensea.common.enums.PermissionLevel;
 import com.returensea.common.model.AgentRequest;
@@ -14,12 +18,16 @@ import dev.langchain4j.service.SystemMessage;
 import dev.langchain4j.service.TokenStream;
 import dev.langchain4j.service.UserMessage;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;
 
+import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BiConsumer;
 import java.util.stream.Collectors;
@@ -29,6 +37,8 @@ import java.util.stream.Collectors;
 public class ActivityAgent extends AbstractDomainAgent {
     private static final String CREATE_DRAFT_PREFIX = "CREATE_DRAFT|";
     private static final String CREATE_DRAFT_DONE = "CREATE_DRAFT_DONE";
+    /** 拼进用户消息的最近轮次，避免刚搜过的活动/工具结果丢失 */
+    private static final int RECENT_HISTORY_TURNS = 8;
 
     interface ActivityAssistant {
         @SystemMessage(SYSTEM_PROMPT)
@@ -51,6 +61,9 @@ public class ActivityAgent extends AbstractDomainAgent {
             工具使用规则：
             - 当用户想找/推荐活动时，只调用 searchActivities；不要主动建议用户“发起活动”或“创建活动”。
             - 当用户想报名/参加某活动时，先收集信息，齐全后调用 registerActivity；不要调用 createActivity。
+            - 用户在同一轮或最近对话里已明确「要参加」并提供了姓名+手机号时，必须立即调用 registerActivity，禁止让用户逐字重复整段话或空洞确认。若用户仅回复「是的」「好的」「确认」等，且上一轮已留过姓名电话，视为确认报名，须立即 registerActivity，不得再次复述同一套确认话术。
+            - 若本轮 searchActivities 只展示过一场活动且用户未指定 ID，registerActivity 的 activityId 用字符串 "1"（表示推荐列表第 1 条）。
+            - searchActivities 返回的每条活动都带有「活动ID（报名 registerActivity 必填）」：请把该 ID 原样传给 registerActivity 的 activityId；也可用 1、2、3 表示本次推荐列表中的第几个。勿编造 act-xxx；严禁把活动标题里的长数字（如「-1774172424602」等时间戳后缀）当作 activityId。若用户只说城市/标题没有 ID，应先 searchActivities 或请用户从最近列表中选 ID。
             - 当用户查状态时，调用 queryOrder 工具。
             - 仅当用户明确说“发起活动”“创建活动”“办活动”“发布活动”“组织活动”时，才视为创建意图；先补齐标题、城市、日期，齐全后调用 createActivity。用户只说“参加”“推荐”“找活动”或只提供时间、地点、主题时，不得调用 createActivity。
             - 如果用户消息较短（如“上海，明天”），先结合最近对话理解意图，不要直接改成搜索活动。
@@ -58,6 +71,8 @@ public class ActivityAgent extends AbstractDomainAgent {
             回答风格：
             - 热情、专业、简洁。
             - 如果没有找到活动，只建议用户尝试其他城市或时间，不要主动提议“可以发起一个活动”。
+            - 严禁在同一条回复里编造多轮对话（例如「用户：」「助手：」来回演戏），严禁把同一段话或同一段错误说明重复粘贴多遍。
+            - 每次调用工具后，只用一两句话向用户说明结果；若报名失败，简洁说明原因与下一步即可，不要模拟“再试一次”的多轮内心戏。
             """;
 
     private final ActivityAssistant assistant;
@@ -69,7 +84,9 @@ public class ActivityAgent extends AbstractDomainAgent {
                          StreamingChatModel streamingChatLanguageModel,
                          ToolCenter toolCenter,
                          MemoryService memoryService,
-                         BannedContentInputGuardrail inputGuardrail) {
+                         BannedContentInputGuardrail inputGuardrail,
+                         @Qualifier(LangChainStreamingExecutorConfig.ACTIVITY_STREAMING_TOOL_EXECUTOR)
+                         Executor activityStreamingToolExecutor) {
         this.memoryService = memoryService;
         this.toolCenter = toolCenter;
         this.assistant = AiServices.builder(ActivityAssistant.class)
@@ -81,6 +98,7 @@ public class ActivityAgent extends AbstractDomainAgent {
                 .streamingChatModel(streamingChatLanguageModel)
                 .tools(toolCenter)
                 .inputGuardrails(inputGuardrail)
+                .executeToolsConcurrently(activityStreamingToolExecutor)
                 .build();
     }
 
@@ -93,6 +111,10 @@ public class ActivityAgent extends AbstractDomainAgent {
     protected String processInternal(AgentRequest request) {
         log.info("ActivityAgent processing request: {}", request.getMessage());
         try {
+            String registerResult = tryHandleRegisterContinuation(request);
+            if (registerResult != null) {
+                return registerResult;
+            }
             String createResult = tryHandleCreateContinuation(request);
             if (createResult != null) {
                 return createResult;
@@ -116,11 +138,21 @@ public class ActivityAgent extends AbstractDomainAgent {
      * 会阻塞直到流结束或超时，避免 SSE 在未收到内容前就完成。
      */
     public void streamProcess(AgentRequest request, BiConsumer<String, String> eventSink) {
+        long t0 = System.currentTimeMillis();
         log.info("ActivityAgent streaming request: {}", request.getMessage());
+        // 流式链路可能在虚拟线程上执行，与 Orchestrator 设置 ThreadLocal 的线程不一致；此处保证本线程可见 session/userId，供工具线程快照。
+        AgentContextHolder.set(request.getSessionId(), request.getUserId());
         try {
+            String registerResult = tryHandleRegisterContinuation(request);
+            if (registerResult != null) {
+                eventSink.accept("contentDelta", registerResult);
+                log.info("ActivityAgent stream short-circuit=registerActivity tookMs={}", System.currentTimeMillis() - t0);
+                return;
+            }
             String createResult = tryHandleCreateContinuation(request);
             if (createResult != null) {
                 eventSink.accept("contentDelta", createResult);
+                log.info("ActivityAgent stream short-circuit=createDraft tookMs={}", System.currentTimeMillis() - t0);
                 return;
             }
             String contextAwareMessage = buildContextAwareMessage(request);
@@ -128,15 +160,18 @@ public class ActivityAgent extends AbstractDomainAgent {
             CountDownLatch done = new CountDownLatch(1);
             stream
                     .onPartialResponse(chunk -> eventSink.accept("contentDelta", chunk))
-                    .onCompleteResponse(r -> done.countDown())
+                    .onCompleteResponse(r -> {
+                        log.info("ActivityAgent streaming LLM+tools completed tookMs={}", System.currentTimeMillis() - t0);
+                        done.countDown();
+                    })
                     .onError(e -> {
-                        log.error("ActivityAgent streaming error", e);
+                        log.error("ActivityAgent streaming error afterMs={}", System.currentTimeMillis() - t0, e);
                         eventSink.accept("contentDelta", "抱歉，我现在有点忙，请稍后再试。（流式调用异常）");
                         done.countDown();
                     })
                     .start();
             if (!done.await(STREAM_WAIT_TIMEOUT_MINUTES, TimeUnit.MINUTES)) {
-                log.warn("ActivityAgent streaming wait timed out");
+                log.warn("ActivityAgent streaming wait timed out afterMs={}", System.currentTimeMillis() - t0);
             }
         } catch (InputGuardrailException e) {
             String msg = extractGuardrailBlockMessage(e.getMessage());
@@ -159,6 +194,139 @@ public class ActivityAgent extends AbstractDomainAgent {
             return exceptionMessage.substring(idx + prefix.length()).trim();
         }
         return exceptionMessage;
+    }
+
+    private record NamePhone(String name, String phone) {}
+
+    /**
+     * 用户已给出姓名+电话并表示参加，且会话里已有 searchActivities 写入的 lastActivityIds 时，直接走报名工具，避免模型空转追问。
+     * 支持：仅回复「是的」时从上一轮用户话里找回姓名、手机号后再报名。
+     */
+    private String tryHandleRegisterContinuation(AgentRequest request) {
+        String message = request.getMessage();
+        if (message == null || message.isBlank()) {
+            return null;
+        }
+        String phone = RegistrationParsers.extractPhone(message);
+        String name = RegistrationParsers.extractName(message);
+        boolean contactInCurrentTurn = phone != null && name != null;
+
+        if (!contactInCurrentTurn) {
+            NamePhone recovered = recoverNamePhoneFromRecentUsers(request);
+            if (recovered != null) {
+                name = recovered.name();
+                phone = recovered.phone();
+            }
+        }
+        if (phone == null || name == null) {
+            return null;
+        }
+
+        // 姓名电话来自历史时，须近期用户话里出现过报名意向，避免无关场景里一句「是的」误报名
+        if (!contactInCurrentTurn && !recentUserMessagesSuggestRegistration(request)) {
+            return null;
+        }
+
+        boolean shortAffirm = isShortRegistrationAffirmation(message);
+        boolean explicitSubmit = RegistrationParsers.looksLikeRegisterSubmit(message);
+        // 本轮已写出姓名+电话，且近期对话里有报名/参加语境时，视为提交报名（不必非写「是的」）
+        if (!explicitSubmit && !shortAffirm
+                && !(contactInCurrentTurn && recentUserMessagesSuggestRegistration(request))) {
+            return null;
+        }
+
+        List<String> lastIds = memoryService.getWorkingMemory(request.getSessionId(), request.getUserId())
+                .map(m -> LastActivityIdsSupport.normalize(m.get("lastActivityIds")))
+                .orElse(null);
+        if (lastIds == null || lastIds.isEmpty()) {
+            return null;
+        }
+        String idFragment = resolveRegisterActivityIdToken(request, message);
+        String activityId;
+        if (idFragment != null && !idFragment.isBlank()) {
+            activityId = idFragment.trim();
+        } else if (lastIds.size() == 1) {
+            activityId = "1";
+        } else {
+            // 多场活动且本句未写清第几个 / ID，交给模型（避免误报）
+            return null;
+        }
+        Map<String, Object> params = new HashMap<>();
+        params.put("activityId", activityId);
+        params.put("name", name);
+        params.put("phone", phone);
+        params.put("email", null);
+        log.info("Deterministic registerActivity: activityId={}, name={}, phone={}, shortAffirm={}", activityId, name, phone, shortAffirm);
+        return String.valueOf(toolCenter.executeTool("registerActivity", params, PermissionLevel.L2));
+    }
+
+    /** 仅「是的」「好」等短确认，且当前句内没有新的业务信息 */
+    private static boolean isShortRegistrationAffirmation(String message) {
+        String t = message.trim();
+        if (t.length() > 24) {
+            return false;
+        }
+        String lower = t.toLowerCase(Locale.ROOT);
+        return t.equals("是的") || t.equals("是") || t.equals("好") || t.equals("好的") || t.equals("嗯")
+                || t.equals("嗯嗯") || t.equals("确认") || t.equals("可以") || t.equals("继续")
+                || t.equals("报名") || lower.equals("ok") || t.equals("行");
+    }
+
+    /**
+     * 活动序号/ID 常在上一轮用户话里（如「第三个」），姓名电话在下一轮；合并近期用户输入再解析。
+     */
+    private String resolveRegisterActivityIdToken(AgentRequest request, String message) {
+        String direct = RegistrationParsers.extractActivityOrdinalOrNumericToken(message);
+        if (direct != null) {
+            return direct;
+        }
+        return memoryService.getSessionMemory(request.getSessionId(), request.getUserId())
+                .map(history -> {
+                    int take = Math.min(RECENT_HISTORY_TURNS, history.size());
+                    StringBuilder sb = new StringBuilder();
+                    for (int i = history.size() - take; i < history.size(); i++) {
+                        sb.append(' ').append(safe(history.get(i).get("user")));
+                    }
+                    if (message != null) {
+                        sb.append(' ').append(message);
+                    }
+                    return RegistrationParsers.extractActivityOrdinalOrNumericToken(sb.toString());
+                })
+                .orElse(null);
+    }
+
+    private NamePhone recoverNamePhoneFromRecentUsers(AgentRequest request) {
+        return memoryService.getSessionMemory(request.getSessionId(), request.getUserId())
+                .map(history -> {
+                    int take = Math.min(RECENT_HISTORY_TURNS, history.size());
+                    StringBuilder sb = new StringBuilder();
+                    for (int i = history.size() - take; i < history.size(); i++) {
+                        sb.append(' ').append(safe(history.get(i).get("user")));
+                    }
+                    String blob = sb.toString();
+                    String p = RegistrationParsers.extractPhone(blob);
+                    String n = RegistrationParsers.extractName(blob);
+                    if (p != null && n != null) {
+                        return new NamePhone(n, p);
+                    }
+                    return null;
+                })
+                .orElse(null);
+    }
+
+    private boolean recentUserMessagesSuggestRegistration(AgentRequest request) {
+        return memoryService.getSessionMemory(request.getSessionId(), request.getUserId())
+                .map(history -> {
+                    int take = Math.min(RECENT_HISTORY_TURNS, history.size());
+                    StringBuilder sb = new StringBuilder();
+                    for (int i = history.size() - take; i < history.size(); i++) {
+                        sb.append(safe(history.get(i).get("user")));
+                    }
+                    String blob = sb.toString();
+                    return blob.contains("报名") || blob.contains("参加") || blob.contains("注册")
+                            || RegistrationParsers.extractPhone(blob) != null;
+                })
+                .orElse(false);
     }
 
     private String tryHandleCreateContinuation(AgentRequest request) {
@@ -224,7 +392,7 @@ public class ActivityAgent extends AbstractDomainAgent {
 
     private String renderRecentHistory(List<Map<String, Object>> history) {
         return history.stream()
-                .skip(Math.max(0, history.size() - 3))
+                .skip(Math.max(0, history.size() - RECENT_HISTORY_TURNS))
                 .map(item -> "用户：" + safe(item.get("user")) + "\n助手：" + safe(item.get("assistant")))
                 .collect(Collectors.joining("\n"));
     }
@@ -233,7 +401,7 @@ public class ActivityAgent extends AbstractDomainAgent {
         Set<String> createKeywords = Set.of("创建活动", "发起活动", "发布活动", "办活动", "搞活动");
         return memoryService.getSessionMemory(request.getSessionId(), request.getUserId())
                 .map(history -> history.stream()
-                        .skip(Math.max(0, history.size() - 3))
+                        .skip(Math.max(0, history.size() - RECENT_HISTORY_TURNS))
                         .map(item -> safe(item.get("user")))
                         .anyMatch(text -> createKeywords.stream().anyMatch(text::contains)))
                 .orElse(false);

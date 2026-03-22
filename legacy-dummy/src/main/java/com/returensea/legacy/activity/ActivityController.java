@@ -1,9 +1,12 @@
 package com.returensea.legacy.activity;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.core.env.Environment;
 import org.springframework.core.env.Profiles;
@@ -20,25 +23,52 @@ import java.sql.Statement;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
+@Slf4j
 @RestController
 @RequestMapping("/api/activities")
 public class ActivityController {
 
+    private static final String LOG_PREFIX = "[legacy-dummy ActivityController]";
+
     private final Map<String, Activity> activityStore = new ConcurrentHashMap<>();
     private final Map<String, Registration> registrationStore = new ConcurrentHashMap<>();
     private static final DateTimeFormatter EVENT_TIME_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
+    private final ObjectMapper objectMapper;
+
     @Autowired(required = false)
     private JdbcTemplate jdbcTemplate;
     @Autowired
     private Environment environment;
 
-    public ActivityController() {
+    public ActivityController(ObjectMapper objectMapper) {
+        this.objectMapper = objectMapper;
         initializeSampleData();
+    }
+
+    private String toJson(Object value) {
+        if (value == null) {
+            return "null";
+        }
+        try {
+            return objectMapper.writeValueAsString(value);
+        } catch (JsonProcessingException e) {
+            return value.toString();
+        }
+    }
+
+    private void logIn(String httpMethod, String relativePath, Object payload) {
+        log.info("{} {} {} << IN: {}", LOG_PREFIX, httpMethod, relativePath, toJson(payload));
+    }
+
+    private void logOut(String httpMethod, String relativePath, Object payload) {
+        log.info("{} {} {} >> OUT: {}", LOG_PREFIX, httpMethod, relativePath, toJson(payload));
     }
 
     private void initializeSampleData() {
@@ -94,103 +124,151 @@ public class ActivityController {
     @GetMapping
     public List<Activity> list(@RequestParam(required = false) String city,
                                @RequestParam(required = false) String keyword) {
+        Map<String, Object> in = new LinkedHashMap<>();
+        in.put("city", city);
+        in.put("keyword", keyword);
+        logIn("GET", "/api/activities", in);
+
+        final String cityFilter = normalizeParam(city);
+        final String keywordFilter = normalizeParam(keyword);
+        List<Activity> out;
         if (environment.acceptsProfiles(Profiles.of("middleware")) && jdbcTemplate != null) {
-            return listFromDatabase(city, keyword);
+            out = listFromDatabase(cityFilter, keywordFilter);
+        } else {
+            out = activityStore.values().stream()
+                    .filter(a -> cityFilter == null || a.getCity().equals(cityFilter))
+                    .filter(a -> keywordFilter == null
+                            || a.getTitle().contains(keywordFilter)
+                            || a.getDescription().contains(keywordFilter))
+                    .collect(Collectors.toList());
         }
-        return activityStore.values().stream()
-            .filter(a -> city == null || city.isEmpty() || a.getCity().equals(city))
-            .filter(a -> keyword == null || keyword.isEmpty() || 
-                   a.getTitle().contains(keyword) || a.getDescription().contains(keyword))
-            .collect(Collectors.toList());
+        logOut("GET", "/api/activities", out);
+        return out;
+    }
+
+    /** trim 后空串视为未传，避免 stream 闭包要求 effectively final 与重复 isEmpty 判断 */
+    private static String normalizeParam(String s) {
+        if (s == null) {
+            return null;
+        }
+        String t = s.trim();
+        return t.isEmpty() ? null : t;
     }
 
     @GetMapping("/{id}")
     public Activity get(@PathVariable String id) {
+        logIn("GET", "/api/activities/{id}", Map.of("id", id));
+        Activity activity;
         if (environment.acceptsProfiles(Profiles.of("middleware")) && jdbcTemplate != null) {
-            Activity activity = getFromDatabase(id);
+            activity = getFromDatabase(id);
             if (activity == null) {
                 throw new RuntimeException("Activity not found: " + id);
             }
-            return activity;
+        } else {
+            activity = activityStore.get(id);
+            if (activity == null) {
+                throw new RuntimeException("Activity not found: " + id);
+            }
         }
-        Activity activity = activityStore.get(id);
-        if (activity == null) {
-            throw new RuntimeException("Activity not found: " + id);
-        }
+        logOut("GET", "/api/activities/{id}", activity);
         return activity;
     }
 
     @PostMapping
     public Activity create(@RequestBody CreateActivityRequest request) {
+        logIn("POST", "/api/activities", request);
+        Activity created;
         if (environment.acceptsProfiles(Profiles.of("middleware")) && jdbcTemplate != null) {
-            return createInDatabase(request);
+            created = createInDatabase(request);
+        } else {
+            String id = "act-" + System.currentTimeMillis();
+            created = Activity.builder()
+                    .id(id)
+                    .title(request.getTitle())
+                    .city(request.getCity())
+                    .location(request.getLocation())
+                    .eventTime(request.getEventTime())
+                    .capacity(request.getCapacity() != null ? request.getCapacity() : 100)
+                    .registered(0)
+                    .fee(request.getFee() != null ? request.getFee() : 0)
+                    .description(request.getDescription() != null ? request.getDescription() : "用户发起活动")
+                    .build();
+            activityStore.put(id, created);
         }
-        String id = "act-" + System.currentTimeMillis();
-        Activity activity = Activity.builder()
-            .id(id)
-            .title(request.getTitle())
-            .city(request.getCity())
-            .location(request.getLocation())
-            .eventTime(request.getEventTime())
-            .capacity(request.getCapacity() != null ? request.getCapacity() : 100)
-            .registered(0)
-            .fee(request.getFee() != null ? request.getFee() : 0)
-            .description(request.getDescription() != null ? request.getDescription() : "用户发起活动")
-            .build();
-        activityStore.put(id, activity);
-        return activity;
+        logOut("POST", "/api/activities", created);
+        return created;
     }
 
     @PostMapping("/{id}/register")
     public Registration register(@PathVariable String id, @RequestBody RegistrationRequest request) {
+        Map<String, Object> in = new LinkedHashMap<>();
+        in.put("activityId", id);
+        in.put("body", request);
+        logIn("POST", "/api/activities/{id}/register", in);
+
+        Registration registration;
         if (environment.acceptsProfiles(Profiles.of("middleware")) && jdbcTemplate != null) {
-            return registerInDatabase(id, request);
+            registration = registerInDatabase(id, request);
+        } else {
+            Activity activity = activityStore.get(id);
+            if (activity == null) {
+                throw new RuntimeException("Activity not found: " + id);
+            }
+
+            String regId = "reg-" + System.currentTimeMillis();
+            registration = Registration.builder()
+                    .id(regId)
+                    .activityId(id)
+                    .activityTitle(activity.getTitle())
+                    .name(request.getName())
+                    .phone(request.getPhone())
+                    .email(request.getEmail())
+                    .status("CONFIRMED")
+                    .registeredAt(LocalDateTime.now())
+                    .build();
+
+            registrationStore.put(regId, registration);
         }
-        Activity activity = activityStore.get(id);
-        if (activity == null) {
-            throw new RuntimeException("Activity not found: " + id);
-        }
-        
-        String regId = "reg-" + System.currentTimeMillis();
-        Registration registration = Registration.builder()
-            .id(regId)
-            .activityId(id)
-            .activityTitle(activity.getTitle())
-            .name(request.getName())
-            .phone(request.getPhone())
-            .email(request.getEmail())
-            .status("CONFIRMED")
-            .registeredAt(LocalDateTime.now())
-            .build();
-        
-        registrationStore.put(regId, registration);
+        logOut("POST", "/api/activities/{id}/register", registration);
         return registration;
     }
 
     @GetMapping("/registrations")
     public List<Registration> queryRegistrations(@RequestParam(required = false) String phone,
                                                    @RequestParam(required = false) String orderId) {
+        Map<String, Object> in = new LinkedHashMap<>();
+        in.put("phone", phone);
+        in.put("orderId", orderId);
+        logIn("GET", "/api/activities/registrations", in);
+
+        List<Registration> out;
         if (environment.acceptsProfiles(Profiles.of("middleware")) && jdbcTemplate != null) {
-            return queryRegistrationsFromDatabase(phone, orderId);
+            out = queryRegistrationsFromDatabase(phone, orderId);
+        } else {
+            out = registrationStore.values().stream()
+                    .filter(r -> phone == null || phone.isEmpty() || r.getPhone().equals(phone))
+                    .filter(r -> orderId == null || orderId.isEmpty() || r.getId().equals(orderId))
+                    .collect(Collectors.toList());
         }
-        return registrationStore.values().stream()
-            .filter(r -> phone == null || phone.isEmpty() || r.getPhone().equals(phone))
-            .filter(r -> orderId == null || orderId.isEmpty() || r.getId().equals(orderId))
-            .collect(Collectors.toList());
+        logOut("GET", "/api/activities/registrations", out);
+        return out;
     }
 
     /** 清空测试数据：清空所有报名记录，活动列表恢复为初始样本（仅用于测试环境） */
     @PostMapping("/admin/reset")
     public Map<String, Object> resetTestData() {
+        logIn("POST", "/api/activities/admin/reset", Map.of());
+
         registrationStore.clear();
         activityStore.clear();
         initializeSampleData();
-        return Map.of(
-            "ok", true,
-            "message", "已清空报名记录并恢复活动列表为初始样本",
-            "activities", activityStore.size(),
-            "registrations", 0
-        );
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("ok", true);
+        out.put("message", "已清空报名记录并恢复活动列表为初始样本");
+        out.put("activities", activityStore.size());
+        out.put("registrations", 0);
+        logOut("POST", "/api/activities/admin/reset", out);
+        return out;
     }
 
     @Data
@@ -247,22 +325,27 @@ public class ActivityController {
     }
 
     private List<Activity> listFromDatabase(String city, String keyword) {
-        String sql = """
+        // 动态拼接 + 单占位符绑定「%关键词%」，避免 CONCAT('%',?,'%') 在部分驱动/字符集下与中文参数组合异常导致 0 行
+        StringBuilder sql = new StringBuilder("""
                 SELECT id, title, location, start_time, price, description
                 FROM activity
-                WHERE (? IS NULL OR ? = '' OR location LIKE CONCAT('%', ?, '%'))
-                  AND (? IS NULL OR ? = '' OR title LIKE CONCAT('%', ?, '%') OR description LIKE CONCAT('%', ?, '%'))
-                ORDER BY id DESC
-                """;
-        return jdbcTemplate.query(sql, ps -> {
-            ps.setString(1, city);
-            ps.setString(2, city);
-            ps.setString(3, city);
-            ps.setString(4, keyword);
-            ps.setString(5, keyword);
-            ps.setString(6, keyword);
-            ps.setString(7, keyword);
-        }, (rs, rowNum) -> Activity.builder()
+                WHERE 1=1
+                """);
+        List<Object> args = new ArrayList<>();
+        if (city != null) {
+            sql.append(" AND location LIKE ?");
+            args.add("%" + city + "%");
+        }
+        if (keyword != null) {
+            sql.append(" AND (title LIKE ? OR description LIKE ?)");
+            String kw = "%" + keyword + "%";
+            args.add(kw);
+            args.add(kw);
+        }
+        sql.append(" ORDER BY id DESC");
+        // 必须用 query(sql, Object[] args, RowMapper)：若写成 query(sql, rowMapper, args.toArray())，
+        // varargs 会把整个数组当成「一个」参数，导致占位符与 ? 数量不匹配，常表现为始终 0 行。
+        return jdbcTemplate.query(sql.toString(), args.toArray(), (rs, rowNum) -> Activity.builder()
                 .id(String.valueOf(rs.getLong("id")))
                 .title(rs.getString("title"))
                 .city(extractCity(rs.getString("location")))

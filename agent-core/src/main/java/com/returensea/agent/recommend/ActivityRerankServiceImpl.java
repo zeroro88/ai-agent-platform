@@ -30,7 +30,12 @@ public class ActivityRerankServiceImpl implements ActivityRerankService {
 
         String prompt = buildPrompt(candidates, userContext, topK);
         try {
+            long t0 = System.nanoTime();
+            log.info("activityRerank LLM call start: candidates={}, topK={}", candidates.size(), topK);
             String response = chatLanguageModel.chat(prompt);
+            long llmMs = (System.nanoTime() - t0) / 1_000_000;
+            log.info("activityRerank LLM call done: tookMs={}, responseChars={}", llmMs,
+                    response == null ? 0 : response.length());
             return parseStrict(candidates, response, allowedIds, topK);
         } catch (Exception e) {
             log.warn("LLM rerank failed, returning original order without reasons: {}", e.getMessage());

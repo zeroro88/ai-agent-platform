@@ -95,7 +95,9 @@ public class AgentCoreClient {
                 .traceId(chatRequest.getTraceId())
                 .build();
 
-        log.info("[{}] Calling agent-core process-stream, agentType={}", chatRequest.getTraceId(), routeResult.getTargetAgent());
+        log.info("[{}] Calling agent-core POST /api/v1/agent/process-stream, agentType={}, messageLen={}",
+                chatRequest.getTraceId(), routeResult.getTargetAgent(),
+                chatRequest.getMessage() != null ? chatRequest.getMessage().length() : 0);
 
         return webClient.post()
                 .uri("/api/v1/agent/process-stream")

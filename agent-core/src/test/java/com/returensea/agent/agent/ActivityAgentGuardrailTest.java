@@ -7,6 +7,8 @@ import com.returensea.agent.tool.ToolCenter;
 import com.returensea.common.enums.AgentType;
 import com.returensea.common.enums.PermissionLevel;
 import com.returensea.common.model.ToolDefinition;
+import com.returensea.agent.context.AgentContextPropagatingExecutor;
+import com.returensea.agent.context.StreamRequestContextRegistry;
 import com.returensea.agent.memory.VectorMemoryStore;
 import dev.langchain4j.agent.tool.Tool;
 import com.returensea.common.model.Memory;
@@ -23,6 +25,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.Executor;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -91,12 +94,16 @@ class ActivityAgentGuardrailTest {
         props.setBlockMessage(BLOCK_MSG);
         BannedContentInputGuardrail guardrail = new BannedContentInputGuardrail(props);
 
+        StreamRequestContextRegistry streamRegistry = new StreamRequestContextRegistry();
+        Executor syncToolExecutor = new AgentContextPropagatingExecutor(r -> r.run(), streamRegistry);
+
         ActivityAgent agent = new ActivityAgent(
                 NEVER_CALLED_CHAT,
                 NEVER_CALLED_STREAM,
                 NOOP_TOOL_CENTER,
                 EMPTY_MEMORY,
-                guardrail
+                guardrail,
+                syncToolExecutor
         );
 
         AgentRequest request = AgentRequest.builder()

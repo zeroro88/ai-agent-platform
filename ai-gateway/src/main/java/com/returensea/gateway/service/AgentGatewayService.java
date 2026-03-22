@@ -67,7 +67,10 @@ public class AgentGatewayService {
             ChatResponse resp = buildSlowTrackResponse(request, routeResult, startTime);
             return singleEventFlux("done", resp);
         }
-        return agentCoreClient.processStream(request, routeResult);
+        return agentCoreClient.processStream(request, routeResult)
+                .doOnSubscribe(s -> log.info("[{}] Gateway subscribing to agent-core SSE stream", request.getTraceId()))
+                .doFinally(signal -> log.info("[{}] Gateway agent-core SSE stream finished signal={}, elapsedSinceRouteMs={}",
+                        request.getTraceId(), signal, System.currentTimeMillis() - startTime));
     }
 
     private Flux<DataBuffer> singleEventFlux(String type, ChatResponse payload) {

@@ -12,6 +12,7 @@ import com.returensea.common.util.TraceUtil;
 import com.returensea.agent.agent.ActivityAgent;
 import com.returensea.agent.agent.DomainAgent;
 import com.returensea.agent.context.AgentContextHolder;
+import com.returensea.agent.context.StreamRequestContextRegistry;
 import com.returensea.agent.memory.MemoryService;
 import com.returensea.agent.config.TaskGraphTemplateProperties;
 import com.returensea.agent.util.ContentSanitizer;
@@ -50,6 +51,7 @@ public class OrchestratorImpl implements Orchestrator {
     private final ObjectMapper objectMapper;
     private final TaskGraphTemplateProperties taskGraphTemplate;
     private final ContentSanitizer contentSanitizer;
+    private final StreamRequestContextRegistry streamRequestContextRegistry;
 
     @Override
     public AgentResponse process(AgentRequest request) {
@@ -69,6 +71,9 @@ public class OrchestratorImpl implements Orchestrator {
 
             steps.add("意图识别");
             String intentType = getIntentTypeFromRequest(request);
+            if (intentType != null && !SLOT_REQUIRED_INTENTS.contains(intentType)) {
+                memoryService.clearSlotState(request.getSessionId(), request.getUserId(), "ACTIVITY_REGISTER");
+            }
             if (request.getAgentType() == null && intentType != null) {
                 request.setAgentType(inferAgentTypeFromIntent(intentType));
             }
@@ -160,14 +165,19 @@ public class OrchestratorImpl implements Orchestrator {
             traceId = TraceUtil.generateTraceId();
         }
         TraceUtil.setTraceId(traceId);
+        final String boundTrace = TraceUtil.getTraceId();
         List<String> steps = new ArrayList<>();
         try {
+            streamRequestContextRegistry.bind(boundTrace, request.getSessionId(), request.getUserId());
             log.info("[{}] Processing stream request: {}", TraceUtil.getTraceId(), request.getMessage());
             AgentContextHolder.set(request.getSessionId(), request.getUserId());
             memoryService.updateWorkingMemory(request.getSessionId(), request.getUserId(), request.getMessage());
 
             steps.add("意图识别");
             String intentType = getIntentTypeFromRequest(request);
+            if (intentType != null && !SLOT_REQUIRED_INTENTS.contains(intentType)) {
+                memoryService.clearSlotState(request.getSessionId(), request.getUserId(), "ACTIVITY_REGISTER");
+            }
             if (request.getAgentType() == null && intentType != null) {
                 request.setAgentType(inferAgentTypeFromIntent(intentType));
             }
@@ -220,7 +230,9 @@ public class OrchestratorImpl implements Orchestrator {
             steps.add("构建任务图");
             TaskGraph taskGraph = buildTaskGraph(requestForGraph);
             steps.add("执行任务图");
+            long graphStart = System.currentTimeMillis();
             AgentResponse response = executeTaskGraphStreaming(taskGraph, eventSink);
+            log.info("[{}] executeTaskGraphStreaming done tookMs={}", TraceUtil.getTraceId(), System.currentTimeMillis() - graphStart);
             steps.add("Agent 处理完成");
             if (response.getAgentType() == null) response.setAgentType(request.getAgentType());
             if (response.getUsedPermission() == null) response.setUsedPermission(request.getRequiredPermission());
@@ -241,6 +253,7 @@ public class OrchestratorImpl implements Orchestrator {
             err.setProcessingSteps(steps);
             onComplete.accept(err);
         } finally {
+            streamRequestContextRegistry.unbind(boundTrace);
             AgentContextHolder.clear();
             TraceUtil.clear();
         }
@@ -284,7 +297,11 @@ public class OrchestratorImpl implements Orchestrator {
                                 streamFilter.accept(payload);
                             }
                         };
+                        long agentStreamStart = System.currentTimeMillis();
+                        log.info("[{}] ActivityAgent.streamProcess start nodeId={}", TraceUtil.getTraceId(), node.getNodeId());
                         ((ActivityAgent) agent).streamProcess(buildAgentRequestFromNode(node, taskGraph), agentEventSink);
+                        log.info("[{}] ActivityAgent.streamProcess end nodeId={}, tookMs={}",
+                                TraceUtil.getTraceId(), node.getNodeId(), System.currentTimeMillis() - agentStreamStart);
                         streamFilter.flush();
                         result = accumulated.toString();
                     } else {

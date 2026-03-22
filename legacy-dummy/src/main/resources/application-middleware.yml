@@ -1,5 +1,7 @@
 spring:
   datasource:
+    # characterEncoding 须为 Java 支持的名称（如 UTF-8）；勿写 utf8mb4，否则会报 Unsupported character encoding
+    # Connector/J 在 MySQL 8 下对 UTF-8 会使用 utf8mb4 与库交互
     url: ${MYSQL_URL:jdbc:mysql://localhost:3306/ai_agent_platform?useUnicode=true&characterEncoding=UTF-8&serverTimezone=Asia/Shanghai}
     username: ${MYSQL_USERNAME:root}
     password: ${MYSQL_PASSWORD:root}

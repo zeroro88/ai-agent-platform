@@ -76,8 +76,12 @@ public class ToolCenterImpl implements ToolCenter {
         }
 
         log.info("Executing tool: {} with params: {}", toolName, params);
-        
-        return toolExecutor.execute(toolName, params);
+        long t0 = System.nanoTime();
+        try {
+            return toolExecutor.execute(toolName, params);
+        } finally {
+            log.info("Tool finished: name={}, tookMs={}", toolName, (System.nanoTime() - t0) / 1_000_000);
+        }
     }
 
     @Override

@@ -24,11 +24,23 @@
         button { padding: 12px 24px; background-color: #007AFF; color: white; border: none; border-radius: 8px; cursor: pointer; font-weight: bold; }
         button:hover { background-color: #0066cc; }
         button:disabled { background-color: #ccc; cursor: not-allowed; }
+        .chat-header-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; }
+        .chat-header-title { flex: 1; min-width: 180px; }
+        .chat-header-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+        .session-hint { font-size: 11px; font-weight: normal; color: #888; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .btn-secondary { padding: 8px 14px; background: #fff; color: #007AFF; border: 1px solid #007AFF; border-radius: 8px; cursor: pointer; font-size: 13px; font-weight: 600; }
+        .btn-secondary:hover { background: #f0f7ff; }
     </style>
 </head>
 <body>
     <div class="chat-container">
-        <div class="chat-header">🤖 AI Agent 调试窗口</div>
+        <div class="chat-header chat-header-row">
+            <div class="chat-header-title">🤖 AI Agent 调试窗口</div>
+            <div class="chat-header-actions">
+                <span class="session-hint" id="sessionHint" title="Redis/服务端按此 ID 区分会话记忆"></span>
+                <button type="button" class="btn-secondary" id="freshBtn" onclick="startFreshTest()">新会话（从头测试）</button>
+            </div>
+        </div>
         <div class="chat-messages" id="messages">
             <div class="message agent">您好！我是海归服务平台的 AI 助手。我可以帮您推荐活动、查询政策或解答疑问。请问有什么可以帮您的？</div>
         </div>
@@ -44,8 +56,40 @@
     </div>
 
     <script>
-        const sessionId = localStorage.getItem('agent_demo_session_id') || `web-${Date.now()}`;
-        localStorage.setItem('agent_demo_session_id', sessionId);
+        const SESSION_STORAGE_KEY = 'agent_demo_session_id';
+
+        function generateSessionId() {
+            return 'web-' + Date.now();
+        }
+
+        function loadOrCreateSessionId() {
+            let id = localStorage.getItem(SESSION_STORAGE_KEY);
+            if (!id) {
+                id = generateSessionId();
+                localStorage.setItem(SESSION_STORAGE_KEY, id);
+            }
+            return id;
+        }
+
+        let sessionId = loadOrCreateSessionId();
+
+        function updateSessionHint() {
+            const el = document.getElementById('sessionHint');
+            if (el) el.textContent = 'session: ' + sessionId;
+        }
+
+        /** 新 sessionId + 清空界面，便于从头测（middleware 下 Redis 会话键会换一套） */
+        function startFreshTest() {
+            sessionId = generateSessionId();
+            localStorage.setItem(SESSION_STORAGE_KEY, sessionId);
+            updateSessionHint();
+            const box = document.getElementById('messages');
+            box.innerHTML = '<div class="message agent">已开启新会话（无历史上下文）。我可以帮您推荐活动、查询政策或解答疑问。请问有什么可以帮您的？</div>';
+            document.getElementById('userInput').value = '';
+            document.getElementById('userInput').focus();
+        }
+
+        updateSessionHint();
 
         const MAX_NETWORK_RETRIES = 2;
         const RETRY_DELAY_MS = 1500;

@@ -42,10 +42,13 @@ public class AgentController {
 
     @PostMapping(value = "/process-stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public SseEmitter processStream(@RequestBody AgentRequest request) {
+        final long streamStartMs = System.currentTimeMillis();
         log.info("Received stream request: sessionId={}, userId={}", request.getSessionId(), request.getUserId());
         SseEmitter emitter = new SseEmitter(SSE_TIMEOUT_MS);
-        emitter.onCompletion(() -> log.debug("SSE completed for sessionId={}", request.getSessionId()));
-        emitter.onTimeout(() -> log.warn("SSE timeout for sessionId={}", request.getSessionId()));
+        emitter.onCompletion(() -> log.info("SSE completed for sessionId={}, elapsedMs={}",
+                request.getSessionId(), System.currentTimeMillis() - streamStartMs));
+        emitter.onTimeout(() -> log.warn("SSE timeout for sessionId={}, elapsedMs={}",
+                request.getSessionId(), System.currentTimeMillis() - streamStartMs));
         streamExecutor.execute(() -> {
             try {
                 BiConsumer<String, Object> eventSink = (type, payload) -> sendEvent(emitter, type, payload);
