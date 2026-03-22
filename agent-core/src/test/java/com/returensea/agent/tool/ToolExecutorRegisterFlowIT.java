@@ -102,7 +102,7 @@ class ToolExecutorRegisterFlowIT {
     void searchThenRegister_ordinalOne_succeeds() {
         AgentContextHolder.set("s-it", "u-it");
         Object search = toolExecutor.execute("searchActivities", Map.of("city", "上海", "keyword", ""));
-        assertThat(search.toString()).contains("活动ID");
+        assertThat(search.toString()).contains("【活动ID：");
 
         Map<String, Object> reg = new HashMap<>();
         reg.put("activityId", "1");

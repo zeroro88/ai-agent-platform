@@ -12,6 +12,9 @@ public class AgentConstants {
 
     public static final int WORKING_MEMORY_SIZE = 1024 * 1024;
     public static final int SESSION_MEMORY_TTL_MINUTES = 30;
+
+    /** 工作记忆中存储本轮推荐活动 JSON 数组的 key（Orchestrator 在每轮请求入口清除） */
+    public static final String WORKING_MEMORY_LAST_RECOMMENDED_ACTIVITIES_JSON = "lastRecommendedActivitiesJson";
     public static final int SESSION_MEMORY_SIZE = 10 * 1024;
 
     public static final double LOW_CONFIDENCE_THRESHOLD = 0.6;

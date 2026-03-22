@@ -36,6 +36,8 @@ public class AgentResponse {
     private String errorDetail;
     /** 本次请求的处理步骤，供前端展示「后台判断过程」 */
     private List<String> processingSteps;
+    /** 本轮活动搜索的结构化推荐列表（与 content JSON 中 activities 双写） */
+    private List<RecommendedActivity> recommendedActivities;
 
     @Data
     @Builder

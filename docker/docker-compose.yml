@@ -2,6 +2,10 @@ services:
   mysql:
     image: mysql:8.0
     container_name: agent-mysql
+    # 避免 MYSQL_DATABASE 抢先建库时继承 latin1 等错误默认值，导致中文乱码
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
     environment:
       MYSQL_ROOT_PASSWORD: root
       MYSQL_DATABASE: ai_agent_platform

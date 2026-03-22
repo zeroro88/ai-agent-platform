@@ -30,6 +30,11 @@
         .session-hint { font-size: 11px; font-weight: normal; color: #888; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         .btn-secondary { padding: 8px 14px; background: #fff; color: #007AFF; border: 1px solid #007AFF; border-radius: 8px; cursor: pointer; font-size: 13px; font-weight: 600; }
         .btn-secondary:hover { background: #f0f7ff; }
+        .activity-cards { margin-top: 12px; display: flex; flex-direction: column; gap: 10px; text-align: left; }
+        .activity-card { border: 1px solid #e0e0e0; border-radius: 10px; padding: 12px; background: #fafafa; font-size: 13px; color: #333; }
+        .activity-card .act-title { font-weight: 600; font-size: 15px; }
+        .activity-card .act-city { font-weight: normal; color: #666; font-size: 13px; }
+        .reply-text { white-space: pre-wrap; }
     </style>
 </head>
 <body>
@@ -188,16 +193,23 @@
                                 }
                                 const hasErrorField = data.error || data.errorDetail;
                                 const rawContent = data.content || '';
-                                // 若 content 为 JSON 字符串（如 {"text":"...","type":"message"}），解析后只展示 text
                                 let displayContent = rawContent;
+                                let parsedContent = null;
                                 if (typeof rawContent === 'string' && rawContent.trim().startsWith('{')) {
                                     try {
-                                        const parsed = JSON.parse(rawContent);
-                                        if (parsed && typeof parsed.text === 'string') displayContent = parsed.text;
+                                        parsedContent = JSON.parse(rawContent);
+                                        if (parsedContent && typeof parsedContent.text === 'string') displayContent = parsedContent.text;
                                     } catch (_) { /* 非 JSON 则继续用原文 */ }
                                 }
+                                const activities = pickRecommendedActivities(data, parsedContent);
                                 if (displayContent && !hasErrorField) {
-                                    pendingNode.textContent = stripToolCallJson(displayContent);
+                                    if (activities && activities.length > 0) {
+                                        pendingNode.classList.add('has-structured');
+                                        pendingNode.innerHTML = renderStructuredAgentReply(displayContent, activities);
+                                    } else {
+                                        pendingNode.classList.remove('has-structured');
+                                        pendingNode.textContent = stripToolCallJson(displayContent);
+                                    }
                                     pendingNode.scrollIntoView({ behavior: 'smooth' });
                                 }
                                 const contentLooksLikeError = /失败|错误|未能成功|遇到.*问题|出现.*问题/.test(rawContent);
@@ -279,8 +291,54 @@
             return div;
         }
 
+        function pickRecommendedActivities(data, parsedContent) {
+            if (data.recommendedActivities && data.recommendedActivities.length > 0) return data.recommendedActivities;
+            if (parsedContent && Array.isArray(parsedContent.activities) && parsedContent.activities.length > 0) return parsedContent.activities;
+            return null;
+        }
+
+        function renderStructuredAgentReply(text, activities) {
+            const esc = escapeHtml;
+            const bodyText = stripToolCallJson(text, { skipLineBreakHeuristics: true });
+            let html = '<div class="reply-text">' + esc(bodyText) + '</div>';
+            html += '<div class="activity-cards">';
+            for (const a of activities) {
+                html += '<div class="activity-card"><div><span class="act-title">' + esc(a.title || '') + '</span> ';
+                html += '<span class="act-city">' + esc(a.city || '') + '</span></div>';
+                html += '<div style="margin-top:6px">活动 ID：' + esc(a.id != null ? String(a.id) : '') + '</div>';
+                if (a.recommendReason) html += '<div style="margin-top:6px">推荐理由：' + esc(a.recommendReason) + '</div>';
+                if (a.eventTime) html += '<div style="margin-top:4px">时间：' + esc(a.eventTime) + '</div>';
+                if (a.location) html += '<div style="margin-top:4px">地点：' + esc(a.location) + '</div>';
+                if (a.capacity != null || a.registered != null) {
+                    html += '<div style="margin-top:4px;color:#555">规模：' + esc(a.capacity != null ? String(a.capacity) : '') + '人';
+                    if (a.registered != null) html += '（已报名' + esc(String(a.registered)) + '人）';
+                    html += '</div>';
+                }
+                html += '</div>';
+            }
+            html += '</div>';
+            return html;
+        }
+
+        /** 无结构化 activities 时按关键词补换行；有卡片时依赖减弱。 */
+        function formatActivityReplyForDisplay(text) {
+            if (!text || typeof text !== 'string') return text;
+            let t = text.replace(/(20\d{2}-\d{2}-\d{2})(\d{1,2}:\d{2})/g, '$1 $2');
+            t = t.replace(/(选择：|如下：|包括：)(【)/g, '$1\n$2');
+            t = t.replace(/-{5,}/g, (m) => '\n' + m + '\n');
+            t = t.replace(/([^\n])(【活动ID：)/g, '$1\n$2');
+            t = t.replace(/([^\n])(时间：20\d{2})/g, '$1\n$2');
+            t = t.replace(/([^\n])(地点：)/g, '$1\n$2');
+            t = t.replace(/([^\n])(推荐理由：)/g, '$1\n$2');
+            t = t.replace(/([^\n])(规模：)/g, '$1\n$2');
+            t = t.replace(/(地点：[^\n【]{1,240})(【[\u4e00-\u9fff·\d]{1,12}】)/g, '$1\n$2');
+            t = t.replace(/(地点：[^\n]+?)(请问|您想|若您|欢迎|还有其他|如需|有问题|需要咨询)/g, '$1\n$2');
+            t = t.replace(/：\s+(【[\u4e00-\u9fff·\d]{1,12}】)/g, '：\n$1');
+            return t.replace(/\n{3,}/g, '\n\n').trim();
+        }
+
         /** 从流式内容中移除工具调用的原始 JSON，只保留友好文案；替换为简短提示。杂散 token 由后端输出护栏统一过滤。 */
-        function stripToolCallJson(text) {
+        function stripToolCallJson(text, options) {
             if (!text || typeof text !== 'string') return '';
             let s = text;
             const nameArgStart = /\{\s*"name"\s*:\s*"([^"]+)"\s*,\s*"arguments"\s*:\s*\{/g;
@@ -303,7 +361,11 @@
                 s = s.slice(0, start) + replacement + s.slice(end + 1);
                 nameArgStart.lastIndex = 0;
             }
-            return s.replace(/\n{3,}/g, '\n\n').trim();
+            const trimmed = s.replace(/\n{3,}/g, '\n\n').trim();
+            if (options && options.skipLineBreakHeuristics) {
+                return trimmed.replace(/(20\d{2}-\d{2}-\d{2})(\d{1,2}:\d{2})/g, '$1 $2');
+            }
+            return formatActivityReplyForDisplay(trimmed);
         }
 
         function normalizeContent(content) {

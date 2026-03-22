@@ -46,6 +46,8 @@ class ActivityAgentGuardrailTest {
         @Override
         public void setWorkingMemoryKey(String sessionId, String userId, String key, Object value) {}
         @Override
+        public void removeWorkingMemoryKey(String sessionId, String userId, String key) {}
+        @Override
         public void saveToSessionMemory(String sessionId, String userId, String userMessage, String assistantMessage) {}
         @Override
         public Optional<List<java.util.Map<String, Object>>> getSessionMemory(String sessionId, String userId) { return Optional.empty(); }

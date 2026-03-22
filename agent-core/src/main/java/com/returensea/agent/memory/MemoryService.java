@@ -12,6 +12,8 @@ public interface MemoryService {
     Optional<Map<String, Object>> getWorkingMemory(String sessionId, String userId);
     /** 写入工作记忆中的单个 key，用于存储如 lastActivityIds 等 */
     void setWorkingMemoryKey(String sessionId, String userId, String key, Object value);
+    /** 删除工作记忆中的单个 key */
+    void removeWorkingMemoryKey(String sessionId, String userId, String key);
     void saveToSessionMemory(String sessionId, String userId, String userMessage, String assistantMessage);
     Optional<List<Map<String, Object>>> getSessionMemory(String sessionId, String userId);
     void saveToLongTermMemory(String userId, String type, Map<String, Object> content);

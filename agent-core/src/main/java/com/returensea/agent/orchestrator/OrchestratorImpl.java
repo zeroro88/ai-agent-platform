@@ -3,11 +3,13 @@ package com.returensea.agent.orchestrator;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.returensea.common.constants.AgentConstants;
 import com.returensea.common.enums.AgentType;
 import com.returensea.common.enums.IntentType;
 import com.returensea.common.enums.PermissionLevel;
 import com.returensea.common.model.AgentRequest;
 import com.returensea.common.model.AgentResponse;
+import com.returensea.common.model.RecommendedActivity;
 import com.returensea.common.util.TraceUtil;
 import com.returensea.agent.agent.ActivityAgent;
 import com.returensea.agent.agent.DomainAgent;
@@ -68,6 +70,8 @@ public class OrchestratorImpl implements Orchestrator {
             AgentContextHolder.set(request.getSessionId(), request.getUserId());
 
             memoryService.updateWorkingMemory(request.getSessionId(), request.getUserId(), request.getMessage());
+            memoryService.removeWorkingMemoryKey(request.getSessionId(), request.getUserId(),
+                    AgentConstants.WORKING_MEMORY_LAST_RECOMMENDED_ACTIVITIES_JSON);
 
             steps.add("意图识别");
             String intentType = getIntentTypeFromRequest(request);
@@ -172,6 +176,8 @@ public class OrchestratorImpl implements Orchestrator {
             log.info("[{}] Processing stream request: {}", TraceUtil.getTraceId(), request.getMessage());
             AgentContextHolder.set(request.getSessionId(), request.getUserId());
             memoryService.updateWorkingMemory(request.getSessionId(), request.getUserId(), request.getMessage());
+            memoryService.removeWorkingMemoryKey(request.getSessionId(), request.getUserId(),
+                    AgentConstants.WORKING_MEMORY_LAST_RECOMMENDED_ACTIVITIES_JSON);
 
             steps.add("意图识别");
             String intentType = getIntentTypeFromRequest(request);
@@ -330,13 +336,18 @@ public class OrchestratorImpl implements Orchestrator {
         taskGraph.setStatus(TaskGraph.TaskStatus.COMPLETED);
         taskGraph.setCompletedAt(LocalDateTime.now());
         String normalized = normalizeContentForResponse(finalResponse.toString());
+        List<RecommendedActivity> recommended = loadRecommendedActivitiesFromWorkingMemory(
+                taskGraph.getSessionId(), taskGraph.getUserId());
         AgentResponse.AgentResponseBuilder builder = AgentResponse.builder()
                 .responseId(UUID.randomUUID().toString())
                 .traceId(TraceUtil.getTraceId())
                 .sessionId(taskGraph.getSessionId())
                 .userId(taskGraph.getUserId())
-                .content(buildContentJson(normalized, "message"))
+                .content(buildContentJson(normalized, "message", recommended))
                 .timestamp(LocalDateTime.now());
+        if (!recommended.isEmpty()) {
+            builder.recommendedActivities(recommended);
+        }
         if (lastExecutedAgentNode != null) {
             try {
                 builder.agentType(AgentType.valueOf(lastExecutedAgentNode.getAgentType()));
@@ -477,13 +488,19 @@ public class OrchestratorImpl implements Orchestrator {
         taskGraph.setStatus(TaskGraph.TaskStatus.COMPLETED);
         taskGraph.setCompletedAt(LocalDateTime.now());
 
+        String normalizedSync = normalizeContentForResponse(finalResponse.toString());
+        List<RecommendedActivity> recommendedSync = loadRecommendedActivitiesFromWorkingMemory(
+                taskGraph.getSessionId(), taskGraph.getUserId());
         AgentResponse.AgentResponseBuilder builder = AgentResponse.builder()
                 .responseId(UUID.randomUUID().toString())
                 .traceId(TraceUtil.getTraceId())
                 .sessionId(taskGraph.getSessionId())
                 .userId(taskGraph.getUserId())
-                .content(buildContentJson(normalizeContentForResponse(finalResponse.toString()), "message"))
+                .content(buildContentJson(normalizedSync, "message", recommendedSync))
                 .timestamp(LocalDateTime.now());
+        if (!recommendedSync.isEmpty()) {
+            builder.recommendedActivities(recommendedSync);
+        }
         if (lastExecutedAgentNode != null) {
             try {
                 builder.agentType(AgentType.valueOf(lastExecutedAgentNode.getAgentType()));
@@ -629,12 +646,42 @@ public class OrchestratorImpl implements Orchestrator {
 
     /** 将面向用户的文本封装为 JSON 字符串，便于前端按结构解析 */
     private String buildContentJson(String text, String type) {
+        return buildContentJson(text, type, null);
+    }
+
+    private String buildContentJson(String text, String type, List<RecommendedActivity> activities) {
         if (text == null) text = "";
         try {
-            return objectMapper.writeValueAsString(Map.of("text", text, "type", type != null ? type : "message"));
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("text", text);
+            m.put("type", type != null ? type : "message");
+            if (activities != null && !activities.isEmpty()) {
+                m.put("activities", activities);
+            }
+            return objectMapper.writeValueAsString(m);
         } catch (JsonProcessingException e) {
             log.warn("Failed to build content JSON, falling back to plain text: {}", e.getMessage());
             return text;
+        }
+    }
+
+    private List<RecommendedActivity> loadRecommendedActivitiesFromWorkingMemory(String sessionId, String userId) {
+        if (sessionId == null || userId == null) {
+            return List.of();
+        }
+        Optional<Map<String, Object>> wm = memoryService.getWorkingMemory(sessionId, userId);
+        if (wm.isEmpty()) {
+            return List.of();
+        }
+        Object raw = wm.get().get(AgentConstants.WORKING_MEMORY_LAST_RECOMMENDED_ACTIVITIES_JSON);
+        if (!(raw instanceof String json) || json.isBlank()) {
+            return List.of();
+        }
+        try {
+            return objectMapper.readValue(json, new TypeReference<List<RecommendedActivity>>() {});
+        } catch (Exception e) {
+            log.warn("Failed to parse {}: {}", AgentConstants.WORKING_MEMORY_LAST_RECOMMENDED_ACTIVITIES_JSON, e.getMessage());
+            return List.of();
         }
     }
 

@@ -1,6 +1,9 @@
 package com.returensea.agent.tool;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.returensea.common.constants.AgentConstants;
+import com.returensea.common.model.RecommendedActivity;
 import com.returensea.agent.context.AgentContextHolder;
 import com.returensea.agent.memory.MemoryService;
 import com.returensea.agent.recommend.ActivityRerankService;
@@ -195,7 +198,9 @@ public class ToolExecutor {
 
             Map<String, Activity> byId = Arrays.stream(activities).filter(a -> a.getId() != null).collect(Collectors.toMap(Activity::getId, a -> a, (a, b) -> a));
             StringBuilder result = new StringBuilder("根据您的需求，我为您精选并排序了以下活动：\n\n");
+            List<RecommendedActivity> recommended = new ArrayList<>();
             int appended = 0;
+            boolean firstBlock = true;
             for (int i = 0; i < reranked.size(); i++) {
                 ActivityRerankService.RerankedActivity r = reranked.get(i);
                 Activity a = byId.get(r.id());
@@ -203,17 +208,33 @@ public class ToolExecutor {
                     log.warn("Rerank id {} not in byId keys {}, skip line", r.id(), byId.keySet());
                     continue;
                 }
+                if (!firstBlock) {
+                    result.append("----------\n\n");
+                }
+                firstBlock = false;
                 appended++;
-                result.append(appended).append(". 【").append(a.getCity()).append("】").append(a.getTitle()).append("\n");
-                result.append("   推荐理由：").append(r.reason()).append("\n");
-                result.append("   时间：").append(a.getEventTime()).append("\n");
-                result.append("   地点：").append(a.getLocation()).append("\n");
-                result.append("   规模：").append(a.getCapacity()).append("人");
+                recommended.add(RecommendedActivity.builder()
+                        .id(a.getId())
+                        .title(nullToEmpty(a.getTitle()))
+                        .city(nullToEmpty(a.getCity()))
+                        .location(nullToEmpty(a.getLocation()))
+                        .eventTime(formatEventTimeForDisplay(a.getEventTime()))
+                        .recommendReason(nullToEmpty(r.reason()))
+                        .capacity(a.getCapacity())
+                        .registered(a.getRegistered())
+                        .ordinal(appended)
+                        .build());
+                // 无「1.2.」序号，避免与【活动ID：5】粘连成 52；块之间分隔线 + 空行便于前端换行展示
+                result.append("【").append(a.getCity()).append("】").append(a.getTitle()).append("\n");
+                result.append("【活动ID：").append(a.getId()).append("】\n");
+                result.append("推荐理由：").append(r.reason()).append("\n");
+                result.append("时间：").append(formatEventTimeForDisplay(a.getEventTime())).append("\n");
+                result.append("地点：").append(a.getLocation()).append("\n");
+                result.append("规模：").append(a.getCapacity()).append("人");
                 if (a.getRegistered() != null) {
                     result.append("（已报名").append(a.getRegistered()).append("人）");
                 }
                 result.append("\n");
-                result.append("   活动ID（报名 registerActivity 必填）：").append(a.getId()).append("\n\n");
             }
             // 重排 ID 与 JSON 反序列化 id 不一致时，避免出现「只有标题无列表」导致模型误判为无活动
             int displayLines = appended;
@@ -221,18 +242,44 @@ public class ToolExecutor {
                 log.warn("No activities appended after rerank; falling back to plain list (count={})", activities.length);
                 int n = Math.min(10, activities.length);
                 int line = 0;
+                boolean firstFallback = true;
                 for (int i = 0; i < n; i++) {
                     Activity a = activities[i];
                     if (a == null || a.getId() == null) {
                         continue;
                     }
+                    if (!firstFallback) {
+                        result.append("----------\n\n");
+                    }
+                    firstFallback = false;
                     line++;
-                    result.append(line).append(". 【").append(nullToEmpty(a.getCity())).append("】").append(nullToEmpty(a.getTitle())).append("\n");
-                    result.append("   时间：").append(nullToEmpty(a.getEventTime())).append("\n");
-                    result.append("   地点：").append(nullToEmpty(a.getLocation())).append("\n");
-                    result.append("   活动ID（报名 registerActivity 必填）：").append(a.getId()).append("\n\n");
+                    recommended.add(RecommendedActivity.builder()
+                            .id(a.getId())
+                            .title(nullToEmpty(a.getTitle()))
+                            .city(nullToEmpty(a.getCity()))
+                            .location(nullToEmpty(a.getLocation()))
+                            .eventTime(formatEventTimeForDisplay(nullToEmpty(a.getEventTime())))
+                            .recommendReason("")
+                            .capacity(a.getCapacity())
+                            .registered(a.getRegistered())
+                            .ordinal(line)
+                            .build());
+                    result.append("【").append(nullToEmpty(a.getCity())).append("】").append(nullToEmpty(a.getTitle())).append("\n");
+                    result.append("【活动ID：").append(a.getId()).append("】\n");
+                    result.append("时间：").append(formatEventTimeForDisplay(nullToEmpty(a.getEventTime()))).append("\n");
+                    result.append("地点：").append(nullToEmpty(a.getLocation())).append("\n");
+                    result.append("\n");
                 }
                 displayLines = line;
+            }
+            if (sessionId != null && userId != null && !recommended.isEmpty()) {
+                try {
+                    memoryService.setWorkingMemoryKey(sessionId, userId,
+                            AgentConstants.WORKING_MEMORY_LAST_RECOMMENDED_ACTIVITIES_JSON,
+                            objectMapper.writeValueAsString(recommended));
+                } catch (JsonProcessingException e) {
+                    log.warn("Failed to serialize recommended activities to working memory: {}", e.getMessage());
+                }
             }
             log.info("searchActivities success: totalMs={}, displayLines={}", (System.nanoTime() - t0) / 1_000_000, displayLines);
             return result.toString();
@@ -271,7 +318,7 @@ public class ToolExecutor {
                 报名即可获取专属纪念品！
                 """.formatted(
                     a.getTitle(),
-                    a.getEventTime(),
+                    formatEventTimeForDisplay(a.getEventTime()),
                     a.getLocation(),
                     a.getCapacity(),
                     a.getRegistered(),
@@ -286,11 +333,12 @@ public class ToolExecutor {
     }
 
     private Object registerActivity(Map<String, Object> params) {
-        String activityId = (String) params.get("activityId");
+        Object rawActivityId = params.get("activityId");
+        String activityId = rawActivityId != null ? String.valueOf(rawActivityId).trim() : null;
+        if (activityId != null && activityId.isEmpty()) {
+            activityId = null;
+        }
         activityId = resolveActivityIdFromSelection(activityId);
-        String name = (String) params.get("name");
-        String phone = (String) params.get("phone");
-        String email = (String) params.get("email");
 
         List<String> lastIds = getLastActivityIdsFromContext();
         if (activityId == null || activityId.isBlank()) {
@@ -316,7 +364,25 @@ public class ToolExecutor {
             return "报名失败。" + msg;
         }
 
+        String name = params.get("name") != null ? String.valueOf(params.get("name")).trim() : "";
+        String phone = params.get("phone") != null ? String.valueOf(params.get("phone")).trim() : "";
+        if (name.isEmpty() || phone.isEmpty()) {
+            log.warn("registerActivity 姓名或手机为空，拒绝调用下游。activityId={}, name.len={}, phone.len={}",
+                    activityId, name.length(), phone.length());
+            AgentContextHolder.setErrorDetail("[tool=registerActivity] 姓名或手机号为空，请先向用户收集后再调用\nactivityId="
+                    + activityId + "\nparams=" + params);
+            return "报名失败。请先向用户确认真实姓名和手机号码，信息齐全后再提交报名。";
+        }
+
         log.info("Registering activity via HTTP: activityId={}, name={}, phone={}", activityId, name, phone);
+
+        String emailOpt = null;
+        if (params.get("email") != null) {
+            String e = String.valueOf(params.get("email")).trim();
+            if (!e.isEmpty()) {
+                emailOpt = e;
+            }
+        }
 
         try {
             String url = legacyServiceUrl + "/api/activities/" + activityId + "/register";
@@ -324,7 +390,9 @@ public class ToolExecutor {
             Map<String, String> requestBody = new HashMap<>();
             requestBody.put("name", name);
             requestBody.put("phone", phone);
-            if (email != null) requestBody.put("email", email);
+            if (emailOpt != null) {
+                requestBody.put("email", emailOpt);
+            }
 
             HttpHeaders headers = new HttpHeaders();
             headers.setContentType(MediaType.APPLICATION_JSON);
@@ -391,7 +459,7 @@ public class ToolExecutor {
                    "- 活动ID：" + activity.getId() + "\n" +
                    "- 标题：" + activity.getTitle() + "\n" +
                    "- 城市：" + activity.getCity() + "\n" +
-                   "- 时间：" + activity.getEventTime() + "\n" +
+                   "- 时间：" + formatEventTimeForDisplay(activity.getEventTime()) + "\n" +
                    "- 地点：" + activity.getLocation() + "\n" +
                    "我也可以继续帮您发布报名信息。";
         } catch (Exception e) {
@@ -490,6 +558,14 @@ public class ToolExecutor {
 
     private static String nullToEmpty(String s) {
         return s != null ? s : "";
+    }
+
+    /** 部分数据源返回「2026-05-2509:00」无空格，展示时拆开便于阅读 */
+    private static String formatEventTimeForDisplay(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return "";
+        }
+        return raw.replaceFirst("(\\d{4}-\\d{2}-\\d{2})(\\d{1,2}:\\d{2})", "$1 $2");
     }
 
     @FunctionalInterface

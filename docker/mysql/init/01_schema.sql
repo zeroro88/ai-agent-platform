@@ -1,3 +1,7 @@
+-- 本会话按 UTF-8 解析本文件中的中文 INSERT（Docker 每个 .sql 可能为新连接，必须在文件头设置）
+SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci;
+SET CHARACTER SET utf8mb4;
+
 -- 初始化数据库
 CREATE DATABASE IF NOT EXISTS `ai_agent_platform` DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 

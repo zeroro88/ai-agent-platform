@@ -1,5 +1,6 @@
 package com.returensea.gateway.client;
 
+import com.returensea.common.model.RecommendedActivity;
 import com.returensea.common.enums.AgentType;
 import com.returensea.common.enums.PermissionLevel;
 import com.returensea.gateway.dto.ChatRequest;
@@ -116,6 +117,7 @@ public class AgentCoreClient {
                 .error(dto.getError())
                 .errorDetail(dto.getErrorDetail())
                 .processingSteps(dto.getProcessingSteps())
+                .recommendedActivities(dto.getRecommendedActivities())
                 .build();
     }
 
@@ -153,6 +155,7 @@ public class AgentCoreClient {
         private String traceId;
         private String errorDetail;
         private List<String> processingSteps;
+        private List<RecommendedActivity> recommendedActivities;
 
         @Data
         @Builder

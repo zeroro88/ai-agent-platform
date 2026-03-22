@@ -1,5 +1,6 @@
 package com.returensea.gateway.dto;
 
+import com.returensea.common.model.RecommendedActivity;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
@@ -28,6 +29,8 @@ public class ChatResponse {
     private String errorDetail;
     /** 处理步骤，用于前端展示后台判断过程 */
     private List<String> processingSteps;
+    /** 活动搜索返回的结构化推荐列表（与 agent-core AgentResponse 对齐） */
+    private List<RecommendedActivity> recommendedActivities;
 
     @Data
     @Builder

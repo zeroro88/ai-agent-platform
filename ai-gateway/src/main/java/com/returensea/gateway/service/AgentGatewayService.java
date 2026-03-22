@@ -100,7 +100,9 @@ public class AgentGatewayService {
                         .processTimeMs(System.currentTimeMillis() - startTime)
                         .timestamp(LocalDateTime.now())
                         .error(response.getError())
+                        .errorDetail(response.getErrorDetail())
                         .processingSteps(response.getProcessingSteps())
+                        .recommendedActivities(response.getRecommendedActivities())
                         .build())
                 .onErrorReturn(buildErrorResponse(request, "Agent processing failed", System.currentTimeMillis() - startTime));
     }

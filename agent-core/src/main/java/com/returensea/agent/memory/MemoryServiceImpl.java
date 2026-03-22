@@ -83,6 +83,19 @@ public class MemoryServiceImpl implements MemoryService {
     }
 
     @Override
+    public void removeWorkingMemoryKey(String sessionId, String userId, String key) {
+        try {
+            String fullKey = WORKING_KEY + sessionId + ":" + userId;
+            Map<String, Object> memory = getWorkingMemory(sessionId, userId).orElse(new HashMap<>());
+            memory.remove(key);
+            memory.put("lastUpdate", System.currentTimeMillis());
+            setValue(fullKey, objectMapper.writeValueAsString(memory), Duration.ofMinutes(5));
+        } catch (JsonProcessingException e) {
+            log.error("Error removing working memory key", e);
+        }
+    }
+
+    @Override
     public void saveToSessionMemory(String sessionId, String userId, String userMessage, String assistantMessage) {
         try {
             String key = SESSION_KEY + sessionId + ":" + userId;

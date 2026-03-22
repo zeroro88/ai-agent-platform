@@ -1,5 +1,7 @@
 -- 已有 MySQL 卷、仅含旧版 2 条 activity 时手动补数据（勿与 init 重复执行于全新库）
--- 用法示例（在仓库根目录）：docker exec -i agent-mysql mysql -uroot -proot < docker/mysql/seed_activity_extra.sql
+-- 用法示例（在仓库根目录，务必指定客户端字符集，避免中文乱码）：
+--   docker exec -i agent-mysql mysql -uroot -proot --default-character-set=utf8mb4 ai_agent_platform < docker/mysql/seed_activity_extra.sql
+SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci;
 USE `ai_agent_platform`;
 
 INSERT INTO `activity` (`title`, `description`, `location`, `start_time`, `end_time`, `status`, `price`) VALUES 

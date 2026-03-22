@@ -91,12 +91,23 @@ mvn test -Dspring.profiles.active=middleware
 | MySQL | `docker compose -f docker/docker-compose.yml up -d mysql` | `mvn -pl legacy-dummy test -Dspring.profiles.active=middleware "-Dtest=*Activity*Test,*Register*Test,*Order*Test"` |
 | Milvus | `docker compose -f docker/docker-compose.yml up -d milvus` | `mvn -pl rag-service test -Dspring.profiles.active=middleware -Dtest=RAGMilvusIntegrationTest` |
 
+### HTTP 端到端（真实服务 + LLM）
+
+依赖需**预先启动**（Docker、legacy-dummy、rag-service、agent-core、ai-gateway、LLM 配置），测试类通过 **`POST http://localhost:8081/api/v1/chat`** 走完整用户链路，**不**随默认 `mvn test` 执行。
+
+- **源码**：[`ai-gateway/src/test/java/com/returensea/gateway/e2e/CriticalUserJourneysHttpE2EIT.java`](ai-gateway/src/test/java/com/returensea/gateway/e2e/CriticalUserJourneysHttpE2EIT.java)（类注释含启动清单与端口说明）
+- **执行**：先按上文启动各服务，再运行  
+  `mvn test -Pe2e -pl ai-gateway`
+- **网关地址**：环境变量 `E2E_GATEWAY_BASE_URL` 或 `-De2e.gateway.baseUrl=...`（默认 `http://localhost:8081`）
+- **Surefire**：父 POM 默认排除测试路径 `**/e2e/**`；`-Pe2e` 仅在 `ai-gateway` 中改为只包含 `e2e` 包下用例
+
 ## 故障排查
 
 - **traceId**：响应/前端中的 `traceId` 与各服务日志一致，可用 `grep "<traceId>" logs/*.log` 在 `ai-agent-platform/logs/` 下定位。
 - **本地日志**：`mvn spring-boot:run` 时，gateway / agent-core / legacy-dummy / rag-service 的日志会写入 `ai-agent-platform/logs/` 下对应 `*.log` 文件。
 - **Connection refused（下游服务）**：报名需 legacy-dummy (8083)，RAG 需 rag-service (8082)。可在 agent-core 的 `application.yml` 或环境变量中配置 `legacy.service.url`、RAG 服务地址。
 - **middleware 下连不上中间件**：确认 Docker 已启动且对应容器在跑（`docker ps`）。Redis 未起时 agent-core 会报 Redis 连接失败；MySQL 未起时 legacy-dummy 集成测试会失败；Milvus 未起时 rag-service 会报 gRPC 连接失败。
+- **MySQL 中文乱码**：`docker-compose` 已为 MySQL 指定 `--character-set-server=utf8mb4`，init 脚本开头含 `SET NAMES utf8mb4`。若**旧数据卷**已是乱码，需删卷重建：`docker compose -f docker/docker-compose.yml down -v` 后再 `up -d mysql`（会丢失本地库数据）。客户端（DataGrip 等）连接请使用 UTF-8 / `useUnicode=true`，避免用 Latin1 查看 utf8mb4 列。
 
 ## 核心能力（与代码一致）
 
