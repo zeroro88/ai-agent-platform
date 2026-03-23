@@ -18,11 +18,13 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.*;
 import org.springframework.stereotype.Component;
+import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.RestTemplate;
 import org.springframework.web.util.UriComponentsBuilder;
 
 import java.net.URI;
 import java.util.*;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 @Slf4j
@@ -193,6 +195,25 @@ public class ToolExecutor {
         return userBlob.contains(p);
     }
 
+    /**
+     * 用户是否在近期原话中明确写出活动 ID（与推荐列表解耦，避免新会话仅给 ID 时只能误调 queryOrder）。
+     * 要求「活动ID：…」或助手展示用的「【活动ID：…】」形式，避免单数字误匹配。
+     */
+    private boolean activityIdExplicitlyStatedByUser(String activityId) {
+        if (activityId == null || activityId.isBlank()) {
+            return false;
+        }
+        String blob = buildUserBlobForRegisterContactCheck();
+        if (blob.isEmpty()) {
+            return false;
+        }
+        if (blob.contains("【活动ID：" + activityId + "】")) {
+            return true;
+        }
+        Pattern p = Pattern.compile("活动\\s*ID\\s*[：:]\\s*" + Pattern.quote(activityId) + "(?!\\d)");
+        return p.matcher(blob).find();
+    }
+
     private static boolean nameStatedInUserBlob(String userBlob, String name) {
         String n = name.trim();
         if (n.isEmpty()) {
@@ -236,8 +257,16 @@ public class ToolExecutor {
                 return "未找到符合条件的活动。";
             }
 
-            List<ActivityRerankService.ActivityCandidate> candidates = Arrays.stream(activities)
-                    .filter(a -> a.getId() != null)
+            List<Activity> activitiesSorted = new ArrayList<>();
+            for (Activity a : activities) {
+                if (a != null && a.getId() != null) {
+                    activitiesSorted.add(a);
+                }
+            }
+            activitiesSorted.sort((a, b) -> Long.compare(
+                    numericActivityIdForSort(b.getId()),
+                    numericActivityIdForSort(a.getId())));
+            List<ActivityRerankService.ActivityCandidate> candidates = activitiesSorted.stream()
                     .map(a -> new ActivityRerankService.ActivityCandidate(
                             a.getId(),
                             a.getTitle() != null ? a.getTitle() : "",
@@ -294,21 +323,17 @@ public class ToolExecutor {
                 result.append("推荐理由：").append(r.reason()).append("\n");
                 result.append("时间：").append(formatEventTimeForDisplay(a.getEventTime())).append("\n");
                 result.append("地点：").append(a.getLocation()).append("\n");
-                result.append("规模：").append(a.getCapacity()).append("人");
-                if (a.getRegistered() != null) {
-                    result.append("（已报名").append(a.getRegistered()).append("人）");
-                }
-                result.append("\n");
+                result.append(formatActivityScaleText(a.getCapacity(), a.getRegistered())).append("\n");
             }
             // 重排 ID 与 JSON 反序列化 id 不一致时，避免出现「只有标题无列表」导致模型误判为无活动
             int displayLines = appended;
-            if (appended == 0 && activities.length > 0) {
-                log.warn("No activities appended after rerank; falling back to plain list (count={})", activities.length);
-                int n = Math.min(10, activities.length);
+            if (appended == 0 && !activitiesSorted.isEmpty()) {
+                log.warn("No activities appended after rerank; falling back to plain list (count={})", activitiesSorted.size());
+                int n = Math.min(10, activitiesSorted.size());
                 int line = 0;
                 boolean firstFallback = true;
                 for (int i = 0; i < n; i++) {
-                    Activity a = activities[i];
+                    Activity a = activitiesSorted.get(i);
                     if (a == null || a.getId() == null) {
                         continue;
                     }
@@ -373,7 +398,7 @@ public class ToolExecutor {
 
                 📅 时间：%s
                 📍 地点：%s
-                👥 规模：%d人（已报名%d人）
+                👥 %s
                 💰 费用：%s
 
                 活动亮点：
@@ -384,9 +409,8 @@ public class ToolExecutor {
                     a.getTitle(),
                     formatEventTimeForDisplay(a.getEventTime()),
                     a.getLocation(),
-                    a.getCapacity(),
-                    a.getRegistered(),
-                    a.getFee() == 0 ? "免费" : "¥" + a.getFee(),
+                    formatActivityScaleText(a.getCapacity(), a.getRegistered()),
+                    a.getFee() == null || a.getFee() == 0 ? "免费" : "¥" + a.getFee(),
                     a.getDescription()
                 );
 
@@ -414,11 +438,13 @@ public class ToolExecutor {
             return "报名失败。未指定要报名的活动。" + hint;
         }
         if (lastIds == null || lastIds.isEmpty()) {
-            log.warn("registerActivity 无最近推荐列表，拒绝调用下游。activityId={}", activityId);
-            AgentContextHolder.setErrorDetail("[tool=registerActivity] 无 lastActivityIds，请先推荐活动\n传入的 activityId=" + activityId);
-            return "报名失败。请先让助手推荐活动，再选择要报名的活动（如回复 1 或活动 ID：act-xxx）。";
-        }
-        if (!lastIds.contains(activityId)) {
+            if (!activityIdExplicitlyStatedByUser(activityId)) {
+                log.warn("registerActivity 无最近推荐列表且用户原话未明确活动 ID，拒绝调用下游。activityId={}", activityId);
+                AgentContextHolder.setErrorDetail("[tool=registerActivity] 无 lastActivityIds，请先推荐活动或在对话中写明「活动ID：…」\n传入的 activityId=" + activityId);
+                return "报名失败。请先让助手推荐活动，再选择要报名的活动（如回复 1 或活动 ID：act-xxx）；若您已知活动 ID，请在消息中写明「活动ID：数字」后再报名。";
+            }
+            log.info("registerActivity 无 lastActivityIds，用户原话已含明确活动 ID，允许继续 activityId={}", activityId);
+        } else if (!lastIds.contains(activityId)) {
             String msg = "活动 ID 不在当前候选列表中，请从最近推荐的活动里选择（如回复 1、2 或使用「活动ID（报名必填）」中的数字）。当前候选 ID：" + String.join(", ", lastIds);
             if (looksLikeTitleEmbeddedNumber(activityId)) {
                 msg += " 提示：您填写的长数字很像活动标题里的后缀（如时间戳），不是报名用的活动 ID；请勿从标题中抄数字。";
@@ -456,9 +482,8 @@ public class ToolExecutor {
             }
         }
 
+        String registerUrl = legacyServiceUrl + "/api/activities/" + activityId + "/register";
         try {
-            String url = legacyServiceUrl + "/api/activities/" + activityId + "/register";
-
             Map<String, String> requestBody = new HashMap<>();
             requestBody.put("name", name);
             requestBody.put("phone", phone);
@@ -470,13 +495,13 @@ public class ToolExecutor {
             headers.setContentType(MediaType.APPLICATION_JSON);
             HttpEntity<Map<String, String>> request = new HttpEntity<>(requestBody, headers);
 
-            ResponseEntity<Registration> response = restTemplate.postForEntity(url, request, Registration.class);
+            ResponseEntity<Registration> response = restTemplate.postForEntity(registerUrl, request, Registration.class);
             Registration reg = response.getBody();
 
             if (reg == null) {
                 log.error("报名失败：下游返回空 body。url={}, activityId={}, name={}, phone={}, statusCode={}",
-                        url, activityId, name, phone, response.getStatusCode());
-                String detail = "[tool=registerActivity] 下游返回空 body\nurl=" + url + "\nactivityId=" + activityId + "\nname=" + name + "\nphone=" + phone + "\nstatusCode=" + response.getStatusCode();
+                        registerUrl, activityId, name, phone, response.getStatusCode());
+                String detail = "[tool=registerActivity] 下游返回空 body\nurl=" + registerUrl + "\nactivityId=" + activityId + "\nname=" + name + "\nphone=" + phone + "\nstatusCode=" + response.getStatusCode();
                 AgentContextHolder.setErrorDetail(detail);
                 return "报名失败，请稍后重试。";
             }
@@ -488,10 +513,21 @@ public class ToolExecutor {
                    "- 订单号：" + reg.getId() + "\n\n" +
                    "我们已发送确认短信，请注意查收。活动当天凭报名二维码入场。";
 
+        } catch (HttpClientErrorException e) {
+            if (e.getStatusCode().isSameCodeAs(HttpStatus.CONFLICT)) {
+                log.info("registerActivity 下游 409：该手机号可能已在该活动下报名 activityId={}", activityId);
+                AgentContextHolder.setErrorDetail("[tool=registerActivity] 重复报名(409)\nurl=" + registerUrl + "\nactivityId=" + activityId);
+                return "您已在该活动下报名，无需重复提交。如需查看订单详情，请提供报名手机号，我可帮您查询。";
+            }
+            log.error("报名调用下游 HTTP 错误：url={}, activityId={}, status={}, error={}",
+                    registerUrl, activityId, e.getStatusCode(), e.getMessage(), e);
+            String detail = buildToolErrorDetail(e, "registerActivity", "url=" + registerUrl);
+            AgentContextHolder.setErrorDetail(detail);
+            return "报名失败，请稍后重试。错误：" + e.getStatusCode().value() + " " + e.getMessage();
         } catch (Exception e) {
             log.error("报名调用下游失败，便于复制排查：url={}, activityId={}, name={}, phone={}, error={}",
-                    legacyServiceUrl + "/api/activities/" + activityId + "/register", activityId, name, phone, e.getMessage(), e);
-            String detail = buildToolErrorDetail(e, "registerActivity", "url=" + legacyServiceUrl + "/api/activities/" + activityId + "/register");
+                    registerUrl, activityId, name, phone, e.getMessage(), e);
+            String detail = buildToolErrorDetail(e, "registerActivity", "url=" + registerUrl);
             AgentContextHolder.setErrorDetail(detail);
             return "报名失败，请稍后重试。错误：" + e.getMessage();
         }
@@ -541,8 +577,14 @@ public class ToolExecutor {
     }
 
     private Object queryOrder(Map<String, Object> params) {
-        String orderId = (String) params.getOrDefault("orderId", "");
-        String phone = (String) params.getOrDefault("phone", "");
+        String orderId = params.get("orderId") != null ? String.valueOf(params.get("orderId")).trim() : "";
+        String phone = params.get("phone") != null ? String.valueOf(params.get("phone")).trim() : "";
+
+        if (orderId.isEmpty() && phone.isEmpty()) {
+            log.warn("queryOrder 拒绝：订单号与手机号均为空");
+            AgentContextHolder.setErrorDetail("[tool=queryOrder] 须提供订单号或手机号之一；活动报名请使用 registerActivity\nparams=" + params);
+            return "无法查询订单：请提供报名订单号或报名所用手机号。若您要报名参加某活动，请说明活动 ID 并提供姓名与手机号，不要调用订单查询。";
+        }
 
         log.info("Querying order via HTTP: orderId={}, phone={}", orderId, phone);
 
@@ -628,6 +670,18 @@ public class ToolExecutor {
         }
     }
 
+    /** 与精排一致：数字 ID 降序即较新活动优先；非数字 ID 靠后 */
+    private static long numericActivityIdForSort(String id) {
+        if (id == null || id.isBlank()) {
+            return Long.MIN_VALUE;
+        }
+        try {
+            return Long.parseLong(id.trim(), 10);
+        } catch (NumberFormatException e) {
+            return Long.MIN_VALUE;
+        }
+    }
+
     private static String nullToEmpty(String s) {
         return s != null ? s : "";
     }
@@ -638,6 +692,20 @@ public class ToolExecutor {
             return "";
         }
         return raw.replaceFirst("(\\d{4}-\\d{2}-\\d{2})(\\d{1,2}:\\d{2})", "$1 $2");
+    }
+
+    /** 规模/已报名人数展示；避免 capacity 为 null 时出现「null人」 */
+    private static String formatActivityScaleText(Integer capacity, Integer registered) {
+        StringBuilder sb = new StringBuilder("规模：");
+        if (capacity != null) {
+            sb.append(capacity).append("人");
+        } else {
+            sb.append("待定");
+        }
+        if (registered != null) {
+            sb.append("（已报名").append(registered).append("人）");
+        }
+        return sb.toString();
     }
 
     @FunctionalInterface

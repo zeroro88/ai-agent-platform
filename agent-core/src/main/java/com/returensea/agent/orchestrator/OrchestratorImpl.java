@@ -46,6 +46,11 @@ public class OrchestratorImpl implements Orchestrator {
 
     private static final Set<String> SLOT_REQUIRED_INTENTS = Set.of("ACTIVITY_REGISTER");
 
+    private static final String INTENT_ACTIVITY_REGISTER = "ACTIVITY_REGISTER";
+
+    /** 报名槽位延续识别：须已有 activityId，避免闲聊里误带手机号时误并入报名 */
+    private static final List<String> REGISTER_SLOT_PROGRESS_KEYS = List.of("activityId", "name", "phone");
+
     private final Map<String, DomainAgent> agentMap;
     private final MemoryService memoryService;
     private final SlotFillingService slotFillingService;
@@ -76,6 +81,7 @@ public class OrchestratorImpl implements Orchestrator {
 
             steps.add("意图识别");
             String intentType = getIntentTypeFromRequest(request);
+            intentType = coerceActivityRegisterIntentIfNeeded(request, intentType);
             if (intentType != null && !SLOT_REQUIRED_INTENTS.contains(intentType)) {
                 memoryService.clearSlotState(request.getSessionId(), request.getUserId(), "ACTIVITY_REGISTER");
             }
@@ -183,6 +189,7 @@ public class OrchestratorImpl implements Orchestrator {
 
             steps.add("意图识别");
             String intentType = getIntentTypeFromRequest(request);
+            intentType = coerceActivityRegisterIntentIfNeeded(request, intentType);
             if (intentType != null && !SLOT_REQUIRED_INTENTS.contains(intentType)) {
                 memoryService.clearSlotState(request.getSessionId(), request.getUserId(), "ACTIVITY_REGISTER");
             }
@@ -369,10 +376,30 @@ public class OrchestratorImpl implements Orchestrator {
                 .message((String) node.getParams().get("message"))
                 .agentType(AgentType.valueOf(node.getAgentType()))
                 .requiredPermission((PermissionLevel) node.getParams().getOrDefault("permission", PermissionLevel.L0))
-                .context(taskGraph.getContext())
+                .context(mergeAgentContextForNode(node, taskGraph))
                 .timestamp(LocalDateTime.now())
                 .traceId(TraceUtil.getTraceId())
                 .build();
+    }
+
+    /**
+     * 合并网关下发的 context（intentType、city 等）与任务图执行过程中写入的节点结果，避免 Agent 侧只看到 node-intent 而丢失路由实体。
+     */
+    private static Map<String, Object> mergeAgentContextForNode(TaskGraph.TaskNode node, TaskGraph taskGraph) {
+        Map<String, Object> merged = new HashMap<>();
+        Object raw = node.getParams() != null ? node.getParams().get("context") : null;
+        if (raw instanceof Map<?, ?> m) {
+            for (Map.Entry<?, ?> e : m.entrySet()) {
+                if (e.getKey() != null) {
+                    merged.put(String.valueOf(e.getKey()), e.getValue());
+                }
+            }
+        }
+        Map<String, Object> graphCtx = taskGraph.getContext();
+        if (graphCtx != null && !graphCtx.isEmpty()) {
+            merged.putAll(graphCtx);
+        }
+        return merged;
     }
 
     @Override
@@ -602,6 +629,71 @@ public class OrchestratorImpl implements Orchestrator {
         if (request.getContext() == null) return null;
         Object v = request.getContext().get("intentType");
         return v != null ? v.toString() : null;
+    }
+
+    /**
+     * 网关本轮若把「仅补手机号/姓名」判成 CHITCHAT 等，会在清槽前丢失报名进度。
+     * 当 Redis 中已有未完成报名且已选 activityId，且本轮话术能新填入 activityId/name/phone 之一时，强制按 ACTIVITY_REGISTER 处理并写回 context。
+     */
+    private String coerceActivityRegisterIntentIfNeeded(AgentRequest request, String intentType) {
+        if (INTENT_ACTIVITY_REGISTER.equals(intentType)) {
+            return intentType;
+        }
+        Map<String, Object> current = memoryService
+                .getSlotState(request.getSessionId(), request.getUserId(), INTENT_ACTIVITY_REGISTER)
+                .orElse(null);
+        if (current == null || current.isEmpty()) {
+            return intentType;
+        }
+        Object activityId = current.get("activityId");
+        if (activityId == null || activityId.toString().isBlank()) {
+            return intentType;
+        }
+        Map<String, Object> currentCopy = new HashMap<>(current);
+        SlotFillingRequest slotReq = SlotFillingRequest.builder()
+                .sessionId(request.getSessionId())
+                .userId(request.getUserId())
+                .intentType(INTENT_ACTIVITY_REGISTER)
+                .userMessage(request.getMessage())
+                .currentSlots(currentCopy)
+                .build();
+        SlotFillingResult merged = slotFillingService.fillSlots(slotReq);
+        if (!registerSlotFillingProgresses(current, merged.getFilledSlots())) {
+            return intentType;
+        }
+        setIntentTypeOnRequest(request, INTENT_ACTIVITY_REGISTER);
+        log.info("[{}] Coerced intent to ACTIVITY_REGISTER (slot continuation after activityId set)", TraceUtil.getTraceId());
+        return INTENT_ACTIVITY_REGISTER;
+    }
+
+    private static boolean registerSlotFillingProgresses(Map<String, Object> before, Map<String, Object> after) {
+        if (after == null) {
+            return false;
+        }
+        for (String key : REGISTER_SLOT_PROGRESS_KEYS) {
+            boolean wasMissing = before == null
+                    || !before.containsKey(key)
+                    || before.get(key) == null
+                    || before.get(key).toString().isBlank();
+            Object v = after.get(key);
+            boolean nowPresent = v != null && !v.toString().isBlank();
+            if (wasMissing && nowPresent) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static void setIntentTypeOnRequest(AgentRequest request, String intentType) {
+        Map<String, Object> ctx = request.getContext();
+        if (ctx == null) {
+            ctx = new HashMap<>();
+            request.setContext(ctx);
+        } else {
+            ctx = new HashMap<>(ctx);
+            request.setContext(ctx);
+        }
+        ctx.put("intentType", intentType);
     }
 
     private SlotFillingResult runSlotFilling(AgentRequest request, String intentType) {

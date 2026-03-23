@@ -7,6 +7,11 @@ spring:
       host: ${REDIS_HOST:localhost}
       port: ${REDIS_PORT:6379}
 
+# 与主 application.yml 一致；显式写出避免仅拉 middleware 配置时误用 Java 旧默认
+agent-core:
+  base-url: ${AGENT_CORE_BASE_URL:http://localhost:8080}
+  read-timeout: ${AGENT_CORE_READ_TIMEOUT:180000}
+
 # middleware 环境下可经环境变量覆盖意图 LLM（与 agent-core 独立）
 ai:
   gateway:

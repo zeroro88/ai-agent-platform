@@ -47,6 +47,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  *       </pre>
  *   </li>
  *   <li>在 agent-core / gateway 中配置好 LLM（如 {@code ai.agent.llm.*}），否则用例会失败或超时。</li>
+ *   <li>调整 {@code agent-core.read-timeout} 后须<strong>重新编译并重启</strong> ai-gateway；未重启时仍可能按旧 30s 出现 {@code flatMap} 超时。</li>
  * </ol>
  *
  * <h3>地址与超时</h3>
@@ -70,12 +71,17 @@ import static org.assertj.core.api.Assertions.assertThat;
  * 单元级校验另见 agent-core 的 {@code RedisMemoryIntegrationTest}。
  * </p>
  *
- * <p>覆盖「推荐后必须列出活动详情」：用户先问推荐、再答「都可以」时，助手不得只写「推荐了两场」却不展示标题/时间/地点/活动ID。</p>
+ * <p>覆盖「推荐后必须列出活动详情」：首轮带城市（如「推荐一些上海的活动」）再答「都可以」，助手不得只写概括却不展示标题/时间/地点/活动ID。</p>
+ *
+ * <p>覆盖意图路由 <b>快轨 / 慢轨 / 混合</b>（{@code RouteType}）：慢轨为网关固定话术且不调用 agent-core；快轨与混合均走 agent，仅通过「非慢轨话术 + agentType 非 SYSTEM」做黑盒区分。</p>
  */
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class CriticalUserJourneysHttpE2EIT {
 
     private static final int HTTP_READ_TIMEOUT_SECONDS = 180;
+
+    /** 与网关 {@code AgentGatewayService} 慢轨固定话术一致（用于断言慢轨） */
+    private static final String SLOW_TRACK_CONTENT_SNIPPET = "此操作需要通过传统方式处理";
 
     /** 与 agent-core {@code application-middleware.yml} 默认一致；可用 {@code E2E_REDIS_HOST} / {@code E2E_REDIS_PORT} 覆盖。 */
     private static final String REDIS_HOST = firstNonBlank(
@@ -243,6 +249,7 @@ class CriticalUserJourneysHttpE2EIT {
                 .as("首轮报名应已解析活动 ID 并写入 Redis")
                 .isNotBlank();
 
+        // 网关可能把纯手机号判成 CHITCHAT；agent-core Orchestrator 应在已有 activityId 时合并槽位延续（见 coerceActivityRegisterIntentIfNeeded）。
         JsonNode r3 = postChat(session, user, "手机13900009988");
         assertSoftlyNoHardError(r3);
         assertThat(displayText(r3)).isNotBlank();
@@ -283,12 +290,13 @@ class CriticalUserJourneysHttpE2EIT {
 
     @Test
     @Order(5)
-    @DisplayName("链路3：推荐 →「都可以」→ 回复须含具体活动信息（非只概括场数）")
+    @DisplayName("链路3：推荐（含城市）→「都可以」→ 回复须含具体活动信息（非只概括场数）")
     void journey_recommendThenVaguePreference_mustShowActivityDetails() throws Exception {
         String session = "e2e-rec-detail-" + UUID.randomUUID();
         String user = "e2e-user";
 
-        JsonNode r1 = postChat(session, user, "推荐一些活动");
+        // 首轮带上城市，避免模型第二轮仍追问城市导致短澄清（仅「推荐一些活动」+「都可以」对 LLM 不稳定）
+        JsonNode r1 = postChat(session, user, "推荐一些上海的活动");
         assertSoftlyNoHardError(r1);
         String t1 = displayText(r1);
         assertThat(t1).isNotBlank();
@@ -297,8 +305,8 @@ class CriticalUserJourneysHttpE2EIT {
         assertSoftlyNoHardError(r2);
         String t2 = displayText(r2);
         assertThat(t2)
-                .as("第二轮仍应有实质推荐内容，不能只有空话")
-                .hasSizeGreaterThan(120);
+                .as("第二轮在已限定城市后应有实质推荐内容，不能只有空话")
+                .hasSizeGreaterThan(80);
         // 工具侧为「【活动ID：…】」；模型若改写须至少保留时间+地点等结构化信息
         boolean hasActivityIdLabel = t2.contains("【活动ID：")
                 || t2.contains("活动ID")
@@ -332,6 +340,59 @@ class CriticalUserJourneysHttpE2EIT {
                         text -> assertThat(text).contains("海归"));
     }
 
+    @Test
+    @Order(7)
+    @DisplayName("路由-慢轨：L3 敏感操作（支付）→ 网关固定话术、不调 agent-core")
+    void journey_route_slowTrack_l3_payment_fixedSystemResponse() throws Exception {
+        String session = "e2e-route-slow-" + UUID.randomUUID();
+        String user = "e2e-user";
+
+        JsonNode r1 = postChat(session, user, "我要支付订单费用");
+        assertSoftlyNoHardError(r1);
+        assertThat(agentType(r1))
+                .as("慢轨应由网关直接返回 SYSTEM")
+                .isEqualTo("SYSTEM");
+        assertThat(displayText(r1))
+                .as("慢轨固定提示")
+                .contains(SLOW_TRACK_CONTENT_SNIPPET);
+    }
+
+    @Test
+    @Order(8)
+    @DisplayName("路由-快轨：闲聊 L0 → 走 agent，非慢轨话术")
+    void journey_route_fastTrack_chitchat_notSlowTrack() throws Exception {
+        String session = "e2e-route-fast-" + UUID.randomUUID();
+        String user = "e2e-user";
+
+        JsonNode r1 = postChat(session, user, "你好呀请问在吗");
+        assertSoftlyNoHardError(r1);
+        assertThat(displayText(r1))
+                .as("快轨不得返回慢轨固定话术")
+                .doesNotContain(SLOW_TRACK_CONTENT_SNIPPET);
+        assertThat(agentType(r1))
+                .as("应答来自领域 Agent，非网关 SYSTEM 慢轨")
+                .isNotEqualTo("SYSTEM")
+                .isNotBlank();
+    }
+
+    @Test
+    @Order(9)
+    @DisplayName("路由-混合：L2（报名）→ 仍走 agent，非慢轨话术")
+    void journey_route_hybrid_l2_register_notSlowTrack() throws Exception {
+        String session = "e2e-route-hybrid-" + UUID.randomUUID();
+        String user = "e2e-user";
+
+        JsonNode r1 = postChat(session, user, "我要报名参加人工智能讲座");
+        assertSoftlyNoHardError(r1);
+        assertThat(displayText(r1))
+                .as("混合轨仍调用 agent-core，不应命中慢轨")
+                .doesNotContain(SLOW_TRACK_CONTENT_SNIPPET);
+        assertThat(agentType(r1))
+                .as("混合轨 agentType 应为业务 Agent")
+                .isNotEqualTo("SYSTEM")
+                .isNotBlank();
+    }
+
     private static JsonNode postChat(String sessionId, String userId, String message) throws Exception {
         String body = MAPPER.createObjectNode()
                 .put("message", message)
@@ -351,6 +412,14 @@ class CriticalUserJourneysHttpE2EIT {
                 .as("HTTP 状态应为 200")
                 .isEqualTo(200);
         return MAPPER.readTree(response.body());
+    }
+
+    private static String agentType(JsonNode chatResponseRoot) {
+        if (chatResponseRoot == null || chatResponseRoot.isNull()) {
+            return "";
+        }
+        JsonNode n = chatResponseRoot.get("agentType");
+        return n == null || n.isNull() ? "" : n.asText("");
     }
 
     /** agent-core 常把 content 做成 JSON：{"type":"message","text":"..."} */

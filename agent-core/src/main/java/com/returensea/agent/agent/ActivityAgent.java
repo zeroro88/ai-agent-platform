@@ -5,22 +5,29 @@ import com.returensea.agent.context.AgentContextHolder;
 import com.returensea.agent.guardrail.BannedContentInputGuardrail;
 import com.returensea.agent.memory.MemoryService;
 import com.returensea.agent.tool.ToolCenter;
+import com.returensea.agent.util.ActivityDiscoveryHeuristics;
 import com.returensea.agent.util.LastActivityIdsSupport;
 import com.returensea.agent.util.RegistrationParsers;
 import com.returensea.common.enums.AgentType;
 import com.returensea.common.enums.PermissionLevel;
 import com.returensea.common.model.AgentRequest;
+import dev.langchain4j.agent.tool.ToolExecutionRequest;
 import dev.langchain4j.model.chat.ChatModel;
 import dev.langchain4j.model.chat.StreamingChatModel;
+import dev.langchain4j.model.chat.response.ChatResponse;
 import dev.langchain4j.guardrail.InputGuardrailException;
+import dev.langchain4j.guardrail.InputGuardrailResult;
 import dev.langchain4j.service.AiServices;
 import dev.langchain4j.service.SystemMessage;
 import dev.langchain4j.service.TokenStream;
 import dev.langchain4j.service.UserMessage;
+import dev.langchain4j.service.tool.ToolExecution;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;
 
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
@@ -61,12 +68,12 @@ public class ActivityAgent extends AbstractDomainAgent {
             工具使用规则：
             - 当用户想找/推荐活动时，只调用 searchActivities；不要主动建议用户“发起活动”或“创建活动”。
             - searchActivities 返回后，你**必须**在同一条回复里向用户**完整展示**工具结果：每场活动以「----------」分隔块，块内含「【城市】标题」行、【活动ID：xxx】、时间、地点等（可分段排版，但不得省略任何一场的标题与【活动ID：…】）。**禁止**只说「为您推荐了两场活动」却不列出具体内容就让用户选择或报名；若工具结果较长，允许精简「推荐理由」字数，但标题/时间/地点/活动ID缺一不可；**复述时须保留原文换行**，每个【活动ID】、时间、地点单独成行，勿压成一段连续汉字（否则前端无法换行展示）。
-            - 当用户想报名/参加某活动时，先收集信息，齐全后调用 registerActivity；不要调用 createActivity。
+            - 当用户想报名/参加某活动时，先收集信息，齐全后调用 registerActivity；不要调用 createActivity。用户已提供「活动ID：数字」时属于报名场景，必须走 registerActivity（或先 getActivityDetail 核对），禁止调用 queryOrder；queryOrder 仅用于用户明确要查订单状态且已提供订单号或手机号。
             - registerActivity 的姓名、手机号必须来自用户原话（本轮或最近对话中用户明确说出的内容），严禁编造、猜测或使用示例（如「张三」「李四」「13800138000」等占位）；信息不全时只追问用户，不得用假数据凑参数。
             - 用户在同一轮或最近对话里已明确「要参加」并提供了姓名+手机号时，必须立即调用 registerActivity，禁止让用户逐字重复整段话或空洞确认。若用户仅回复「是的」「好的」「确认」等，且上一轮已留过姓名电话，视为确认报名，须立即 registerActivity，不得再次复述同一套确认话术。
             - 若本轮 searchActivities 只展示过一场活动且用户未指定 ID，registerActivity 的 activityId 用字符串 "1"（表示推荐列表第 1 条）。
             - searchActivities 返回的每条活动都带有「【活动ID：…】」：请把该 ID 原样传给 registerActivity 的 activityId；也可用 1、2、3 表示**自上而下第几场**（第一场=1）。勿编造 act-xxx；严禁把活动标题里的长数字（如「-1774172424602」等时间戳后缀）当作 activityId。展示时须保留【活动ID：数字】格式，勿与相邻场次内容连成错误数字。若用户只说城市/标题没有 ID，应先 searchActivities 或请用户从最近列表中选 ID。
-            - 当用户查状态时，调用 queryOrder 工具。
+            - 当用户查报名/订单状态时，调用 queryOrder，且参数中订单号与手机号至少填一个；不得在活动报名流程中用 queryOrder 代替 registerActivity。
             - 仅当用户明确说“发起活动”“创建活动”“办活动”“发布活动”“组织活动”时，才视为创建意图；先补齐标题、城市、日期，齐全后调用 createActivity。用户只说“参加”“推荐”“找活动”或只提供时间、地点、主题时，不得调用 createActivity。
             - 如果用户消息较短（如“上海，明天”），先结合最近对话理解意图，不要直接改成搜索活动。
             
@@ -81,6 +88,7 @@ public class ActivityAgent extends AbstractDomainAgent {
     private final ActivityAssistantStreaming streamingAssistant;
     private final MemoryService memoryService;
     private final ToolCenter toolCenter;
+    private final BannedContentInputGuardrail inputGuardrail;
 
     public ActivityAgent(ChatModel chatLanguageModel,
                          StreamingChatModel streamingChatLanguageModel,
@@ -91,6 +99,7 @@ public class ActivityAgent extends AbstractDomainAgent {
                          Executor activityStreamingToolExecutor) {
         this.memoryService = memoryService;
         this.toolCenter = toolCenter;
+        this.inputGuardrail = inputGuardrail;
         this.assistant = AiServices.builder(ActivityAssistant.class)
                 .chatModel(chatLanguageModel)
                 .tools(toolCenter)
@@ -120,6 +129,14 @@ public class ActivityAgent extends AbstractDomainAgent {
             String createResult = tryHandleCreateContinuation(request);
             if (createResult != null) {
                 return createResult;
+            }
+            String blocked = blockingUserInputFromGuardrail(request.getMessage());
+            if (blocked != null) {
+                return blocked;
+            }
+            String forcedSearch = tryForcedActivitySearch(request);
+            if (forcedSearch != null) {
+                return forcedSearch;
             }
             String contextAwareMessage = buildContextAwareMessage(request);
             return assistant.chat(contextAwareMessage);
@@ -158,13 +175,42 @@ public class ActivityAgent extends AbstractDomainAgent {
                 log.info("ActivityAgent stream short-circuit=createDraft tookMs={}", System.currentTimeMillis() - t0);
                 return;
             }
+            String blocked = blockingUserInputFromGuardrail(request.getMessage());
+            if (blocked != null) {
+                eventSink.accept("contentBanned", blocked);
+                log.info("ActivityAgent stream short-circuit=inputGuardrail tookMs={}", System.currentTimeMillis() - t0);
+                return;
+            }
+            String forcedSearch = tryForcedActivitySearch(request);
+            if (forcedSearch != null) {
+                eventSink.accept("contentDelta", forcedSearch);
+                log.info("ActivityAgent stream short-circuit=forcedSearch tookMs={}", System.currentTimeMillis() - t0);
+                return;
+            }
             String contextAwareMessage = buildContextAwareMessage(request);
             TokenStream stream = streamingAssistant.chat(contextAwareMessage);
             CountDownLatch done = new CountDownLatch(1);
+            List<String> executedToolNames = Collections.synchronizedList(new ArrayList<>());
             stream
+                    .onToolExecuted((ToolExecution te) -> {
+                        ToolExecutionRequest req = te.request();
+                        String name = req != null ? req.name() : "(unknown)";
+                        executedToolNames.add(name);
+                        log.info("ActivityAgent streaming tool done: name={}, failed={}", name, te.hasFailed());
+                    })
                     .onPartialResponse(chunk -> eventSink.accept("contentDelta", chunk))
-                    .onCompleteResponse(r -> {
-                        log.info("ActivityAgent streaming LLM+tools completed tookMs={}", System.currentTimeMillis() - t0);
+                    .onCompleteResponse((ChatResponse r) -> {
+                        long tookMs = System.currentTimeMillis() - t0;
+                        String finalToolHints = "";
+                        if (r != null && r.aiMessage() != null && r.aiMessage().hasToolExecutionRequests()) {
+                            finalToolHints = r.aiMessage().toolExecutionRequests().stream()
+                                    .map(ToolExecutionRequest::name)
+                                    .collect(Collectors.joining(","));
+                        }
+                        log.info("ActivityAgent streaming LLM+tools completed tookMs={}, toolsExecutedInOrder={}, finalResponseToolRequestNames={}",
+                                tookMs,
+                                executedToolNames.isEmpty() ? "none" : executedToolNames,
+                                finalToolHints.isEmpty() ? "none" : finalToolHints);
                         done.countDown();
                     })
                     .onError(e -> {
@@ -330,6 +376,60 @@ public class ActivityAgent extends AbstractDomainAgent {
                             || RegistrationParsers.extractPhone(blob) != null;
                 })
                 .orElse(false);
+    }
+
+    /**
+     * 与 LLM 路径一致：命中禁止词则不执行强制搜索等旁路逻辑。
+     */
+    private String blockingUserInputFromGuardrail(String rawMessage) {
+        InputGuardrailResult r = inputGuardrail.validate(dev.langchain4j.data.message.UserMessage.from(rawMessage));
+        if (r != null && !r.failures().isEmpty()) {
+            return r.failures().get(0).message();
+        }
+        return null;
+    }
+
+    /**
+     * 明确「找/推荐活动」时直接执行 searchActivities，避免模型不调工具而编造列表。
+     * 报名/发起活动意图不拦截，以免打乱槽位与草稿流程。
+     */
+    private String tryForcedActivitySearch(AgentRequest request) {
+        if (isForcedActivitySearchSuppressedByIntent(request)) {
+            return null;
+        }
+        String message = request.getMessage();
+        if (!ActivityDiscoveryHeuristics.looksLikeActivityDiscovery(message)) {
+            return null;
+        }
+        String city = resolveCityForActivitySearch(request, message);
+        Map<String, Object> params = new HashMap<>();
+        params.put("city", city == null ? "" : city);
+        params.put("keyword", "");
+        log.info("Forced searchActivities: city={}", city);
+        return String.valueOf(toolCenter.executeTool("searchActivities", params, PermissionLevel.L0));
+    }
+
+    private static boolean isForcedActivitySearchSuppressedByIntent(AgentRequest request) {
+        if (request.getContext() == null) {
+            return false;
+        }
+        Object it = request.getContext().get("intentType");
+        if (it == null) {
+            return false;
+        }
+        String s = it.toString();
+        return "ACTIVITY_REGISTER".equals(s) || "ACTIVITY_CREATE".equals(s);
+    }
+
+    private String resolveCityForActivitySearch(AgentRequest request, String message) {
+        if (request.getContext() != null) {
+            Object c = request.getContext().get("city");
+            if (c != null && !c.toString().isBlank()) {
+                return c.toString().trim();
+            }
+        }
+        String fromMsg = extractCity(message);
+        return fromMsg.isEmpty() ? "" : fromMsg;
     }
 
     private String tryHandleCreateContinuation(AgentRequest request) {

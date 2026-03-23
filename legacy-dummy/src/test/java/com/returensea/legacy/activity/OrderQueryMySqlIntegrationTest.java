@@ -31,6 +31,20 @@ class OrderQueryMySqlIntegrationTest {
     private JdbcTemplate jdbcTemplate;
 
     @Test
+    @DisplayName("无 orderId/phone 参数时不应返回全表数据")
+    void query_withoutParams_returnsEmpty() {
+        ResponseEntity<List<Map<String, Object>>> response = restTemplate.exchange(
+                "/api/activities/registrations",
+                HttpMethod.GET,
+                null,
+                new ParameterizedTypeReference<>() {});
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(response.getBody()).isNotNull();
+        assertThat(response.getBody()).isEmpty();
+    }
+
+    @Test
     @DisplayName("middleware 下按手机号查询应返回订单与活动信息")
     void query_byPhone_shouldReturnOrders() {
         String phone = "13900005555";

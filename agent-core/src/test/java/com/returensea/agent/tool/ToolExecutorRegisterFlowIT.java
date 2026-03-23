@@ -24,6 +24,7 @@ import java.util.Map;
 
 import static com.github.tomakehurst.wiremock.client.WireMock.aResponse;
 import static com.github.tomakehurst.wiremock.client.WireMock.get;
+import static com.github.tomakehurst.wiremock.client.WireMock.getRequestedFor;
 import static com.github.tomakehurst.wiremock.client.WireMock.post;
 import static com.github.tomakehurst.wiremock.client.WireMock.postRequestedFor;
 import static com.github.tomakehurst.wiremock.client.WireMock.urlPathEqualTo;
@@ -166,6 +167,50 @@ class ToolExecutorRegisterFlowIT {
         assertThat(AgentContextHolder.getErrorDetail()).contains("无 lastActivityIds");
 
         WM.verify(0, postRequestedFor(urlPathMatching("/api/activities/.*/register")));
+    }
+
+    @Test
+    void registerActivity_conflict409_returnsFriendlyDuplicateMessage() {
+        AgentContextHolder.set("s-409", "u-409");
+        memoryService.setWorkingMemoryKey("s-409", "u-409", "lastActivityIds", List.of("77"));
+        AgentContextHolder.setCurrentTurnUserMessage("活动ID：77 张三 13900001111");
+        WM.stubFor(post(urlPathEqualTo("/api/activities/77/register"))
+                .willReturn(aResponse()
+                        .withStatus(409)
+                        .withHeader("Content-Type", "application/json")
+                        .withBody("{\"status\":409,\"error\":\"Conflict\"}")));
+
+        Map<String, Object> reg = new HashMap<>();
+        reg.put("activityId", "77");
+        reg.put("name", "张三");
+        reg.put("phone", "13900001111");
+        reg.put("email", null);
+        Object out = toolExecutor.execute("registerActivity", reg);
+        assertThat(out.toString()).contains("无需重复");
+        assertThat(AgentContextHolder.getErrorDetail()).contains("409");
+    }
+
+    @Test
+    void queryOrder_emptyParams_doesNotCallLegacy() {
+        Object out = toolExecutor.execute("queryOrder", Map.of("orderId", "", "phone", ""));
+        assertThat(out.toString()).contains("无法查询订单");
+        assertThat(AgentContextHolder.getErrorDetail()).contains("queryOrder");
+        WM.verify(0, getRequestedFor(urlPathEqualTo("/api/activities/registrations")));
+    }
+
+    /** 新会话无 search 列表时，用户在本轮写明「活动ID：…」仍可报名。 */
+    @Test
+    void registerActivity_explicitActivityIdInUserTurn_withoutLastIds_succeeds() {
+        AgentContextHolder.set("s-direct", "u-direct");
+        AgentContextHolder.setCurrentTurnUserMessage("活动ID：42，liulinjie，13800138000");
+
+        Map<String, Object> reg = new HashMap<>();
+        reg.put("activityId", "42");
+        reg.put("name", "liulinjie");
+        reg.put("phone", "13800138000");
+        reg.put("email", null);
+        Object out = toolExecutor.execute("registerActivity", reg);
+        assertThat(out.toString()).contains("报名成功");
     }
 
     /** 先 search 写入 lastActivityIds 后，用户直接传「活动ID」字符串也应能报名（与仅传序号 1 对称）。 */

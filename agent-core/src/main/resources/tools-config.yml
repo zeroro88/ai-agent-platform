@@ -25,7 +25,7 @@ ai:
           allowed-agents: [ACTIVITY]
           enabled: true
         - name: queryOrder
-          description: 查询订单状态
+          description: 查询报名订单状态（须订单号或手机号）；非活动报名流程
           permission-level: L1
           allowed-agents: [ACTIVITY]
           enabled: true

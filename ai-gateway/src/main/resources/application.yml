@@ -42,7 +42,8 @@ ai:
 agent-core:
   base-url: http://localhost:8080
   connect-timeout: 5000
-  read-timeout: 30000
+  # 同步 POST /process 等待 agent-core（含 LLM）完成；与 e2e HTTP 读超时一致，避免本地慢模型 30s 即 flatMap 超时
+  read-timeout: 180000
 
 management:
   endpoints:

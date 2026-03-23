@@ -129,7 +129,7 @@ public class ToolCenterImpl implements ToolCenter {
         return String.valueOf(executeTool("createActivity", params, PermissionLevel.L1));
     }
 
-    @Tool("查询报名订单，入参可为订单号或手机号")
+    @Tool("仅当用户要查报名/订单状态时调用；须提供订单号或手机号之一。活动 ID、报名办理请用 registerActivity / getActivityDetail，禁止无参调用本工具")
     public String queryOrder(String orderId, String phone) {
         Map<String, Object> params = new HashMap<>();
         params.put("orderId", orderId == null ? "" : orderId);

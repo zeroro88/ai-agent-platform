@@ -241,6 +241,13 @@ public class ActivityController {
         in.put("orderId", orderId);
         logIn("GET", "/api/activities/registrations", in);
 
+        boolean noFilter = (phone == null || phone.isBlank()) && (orderId == null || orderId.isBlank());
+        if (noFilter) {
+            log.warn("queryRegistrations: 拒绝无过滤条件查询（避免返回全表）");
+            logOut("GET", "/api/activities/registrations", List.of());
+            return List.of();
+        }
+
         List<Registration> out;
         if (environment.acceptsProfiles(Profiles.of("middleware")) && jdbcTemplate != null) {
             out = queryRegistrationsFromDatabase(phone, orderId);

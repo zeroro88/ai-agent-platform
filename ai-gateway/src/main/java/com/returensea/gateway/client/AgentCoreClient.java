@@ -3,6 +3,7 @@ package com.returensea.gateway.client;
 import com.returensea.common.model.RecommendedActivity;
 import com.returensea.common.enums.AgentType;
 import com.returensea.common.enums.PermissionLevel;
+import com.returensea.gateway.config.AgentCoreProperties;
 import com.returensea.gateway.dto.ChatRequest;
 import com.returensea.gateway.dto.ChatResponse;
 import com.returensea.gateway.dto.RouteResult;
@@ -18,6 +19,7 @@ import org.springframework.web.reactive.function.client.WebClient;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
+import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.HashMap;
 import java.util.List;
@@ -29,9 +31,12 @@ import java.util.stream.Collectors;
 public class AgentCoreClient {
 
     private final WebClient webClient;
+    private final Duration agentCoreResponseTimeout;
 
-    public AgentCoreClient(@Qualifier("agentCoreWebClient") WebClient webClient) {
+    public AgentCoreClient(@Qualifier("agentCoreWebClient") WebClient webClient, AgentCoreProperties agentCoreProperties) {
         this.webClient = webClient;
+        int ms = Math.max(1, agentCoreProperties.getReadTimeout());
+        this.agentCoreResponseTimeout = Duration.ofMillis(ms);
     }
 
     public Mono<ChatResponse> processAgentRequest(ChatRequest chatRequest, RouteResult routeResult) {
@@ -61,7 +66,7 @@ public class AgentCoreClient {
                 .bodyValue(request)
                 .retrieve()
                 .bodyToMono(AgentResponseDTO.class)
-                .timeout(java.time.Duration.ofSeconds(30))
+                .timeout(agentCoreResponseTimeout)
                 .onErrorResume(e -> {
                     log.error("[{}] Error calling agent-core: {}", chatRequest.getTraceId(), e.getMessage());
                     return Mono.just(AgentResponseDTO.builder()
